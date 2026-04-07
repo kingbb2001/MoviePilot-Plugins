@@ -1,6 +1,6 @@
 """
 影巢签到插件
-版本: 2.3.4
+版本: 2.3.5
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,20 +10,13 @@
 - 默认使用代理访问
 
 修改记录:
-- v2.3.4: 移除Open API相关代码（Open API为Premium专属，免费用户不可用），恢复内部API优先+RSC兜底方案
-- v2.3.3: 新增Open API Key配置项，Open API回到首选并支持API Key认证获取完整用户信息
-- v2.3.2: 优化用户信息获取策略（内部API优先+Open API降次选+404静默+RSC增强日志）
-- v2.3.1: 补充版本历史记录完整性（补全v1.5.0/v1.6.0/v2.1.1/v2.2.2缺失条目）+版本号递增确保插件市场可识别更新
-- v2.3.0: 新增Open API用户信息获取（多路径探测）+头像显示优化（无效URL自动降级为字母占位符）
+- v2.3.5: 回退到v2.2.2稳定基线代码，移除v2.3.0-v2.3.4期间添加的全部Open API相关功能（Open API为Premium专属，免费用户不可用）
 - v2.2.2: 修复签到重复执行检测+延长重试任务冲突+通知模板美化（用户信息卡片集成）
 - v2.2.1: 修复cloudscraper未安装时import直接崩溃导致自动登录完全失败（安全导入+requests回退）
 - v2.2.0: 修复代理保存丢失+Cookie提前刷新+登录流程优化(303处理+CF检测)
-- v2.1.1: 修复API description字段检查+JWT user_id解析
 - v2.1.0: 修复：1)用户名/密码保存后重新进入设置不再丢失 2)已签到场景正确识别（手动签过后不再重复重试3次） 3)API返回"已经签到"时标记为成功而非失败
 - v2.0.0: 重大更新：1)添加独立代理配置（支持HTTP/SOCKS5/系统代理/直连） 2)重写自动登录逻辑：使用actionId服务+Server Action方式 3)所有网络请求统一走插件代理配置
 - v1.6.1: 修复插件目录名与ID不匹配导致的404安装失败
-- v1.6.0: 更改插件ID为 HdhiveSignKB，与原版完全独立
-- v1.5.0: 迁移至 kingbb2001 仓库，更改为独立插件
 - v1.4.0: 修复插件市场注册问题（添加根目录 package.json）
 - v1.3.0: 用户信息卡片美化；通知追加用户摘要；重复签到与执行前预拉取用户信息；RSC解析兜底
 - v1.2.0: 自动登录刷新Cookie：cloudscraper与Playwright兜底；修复重复失败记录；默认域名更新为 hdhive.com
@@ -60,7 +53,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.3.4"
+    plugin_version = "2.3.5"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -89,10 +82,8 @@ class HdhiveSignKB(_PluginBase):
     # 影巢站点配置（域名可配置）
     _base_url = "https://hdhive.com"
     _site_url = f"{_base_url}/"
-    # 签到接口
     _signin_api = f"{_base_url}/api/customer/user/checkin"
-    # 用户信息接口（按优先级尝试）
-    _user_info_api = f"{_base_url}/api/customer/user/info"  # 内部 API
+    _user_info_api = f"{_base_url}/api/customer/user/info"
     _login_api_candidates = [
         "/api/customer/user/login",
         "/api/customer/auth/login",
@@ -160,7 +151,7 @@ class HdhiveSignKB(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign v2.3.4 初始化 =============")
+        logger.info("============= hdhivesign v2.3.5 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -209,7 +200,7 @@ class HdhiveSignKB(_PluginBase):
                     "username": getattr(self, "_username", ""),
                     "password": getattr(self, "_password", ""),
                     "proxy_mode": self._proxy_mode,
-                    "proxy_url": self._proxy_url,
+                    "proxy_url": self._proxy_url
                 })
 
                 # 启动任务
@@ -717,11 +708,6 @@ class HdhiveSignKB(_PluginBase):
             logger.error(f"保存签到历史记录失败: {str(e)}", exc_info=True)
 
     def _fetch_user_info(self, cookies: Dict[str, str], token: str) -> Optional[dict]:
-        """
-        获取用户信息，按优先级尝试多种方式：
-        1. 内部 API（/api/customer/user/info）— Cookie/Token 认证（首选）
-        2. RSC 页面解析 — 兜底方案
-        """
         try:
             referer = self._site_url
             try:
@@ -731,45 +717,34 @@ class HdhiveSignKB(_PluginBase):
                     referer = f"{self._base_url}/user/{user_id}"
             except Exception:
                 pass
-
-            info = {}
-            proxies = self._get_proxies()
-
-            # ========== 方式1：内部 API（Cookie/Token 认证） ==========
+            headers = {
+                'User-Agent': settings.USER_AGENT,
+                'Accept': 'application/json, text/plain, */*',
+                'Origin': self._base_url,
+                'Referer': referer,
+                'Authorization': f'Bearer {token}',
+            }
+            resp = requests.get(self._user_info_api, headers=headers, cookies=cookies, proxies=self._get_proxies(), timeout=30, verify=False)
+            logger.info(f"拉取用户信息 API 状态码: {getattr(resp,'status_code','unknown')} CT: {getattr(resp.headers,'get',lambda k:'' )('Content-Type')}")
+            data = {}
             try:
-                headers = {
-                    'User-Agent': settings.USER_AGENT,
-                    'Accept': 'application/json, text/plain, */*',
-                    'Origin': self._base_url,
-                    'Referer': referer,
-                    'Authorization': f'Bearer {token}',
-                }
-                resp = requests.get(self._user_info_api, headers=headers, cookies=cookies, proxies=proxies, timeout=30, verify=False)
-                logger.info(f"内部API 用户信息 状态码: {getattr(resp,'status_code','unknown')} CT: {getattr(resp.headers,'get',lambda k:'' )('Content-Type')}")
-                if getattr(resp, 'status_code', None) == 200:
-                    data = {}
-                    try:
-                        data = resp.json()
-                    except Exception:
-                        data = {}
-                    detail = (data.get('response') or {}).get('data') or data.get('detail') or data.get('data') or {}
-                    if not isinstance(detail, dict):
-                        detail = {}
-                    if detail.get('nickname') or detail.get('member_name'):
-                        info.update({
-                            'id': detail.get('id') or detail.get('member_id'),
-                            'nickname': detail.get('nickname') or detail.get('member_name'),
-                            'avatar_url': detail.get('avatar_url') or detail.get('gravatar_url') or '',
-                            'created_at': detail.get('created_at'),
-                            'points': ((detail.get('user_meta') or {}).get('points')),
-                            'signin_days_total': ((detail.get('user_meta') or {}).get('signin_days_total')),
-                            'warnings_nums': detail.get('warnings_nums'),
-                        })
-                        logger.info(f"内部API 用户信息获取成功: nickname={info.get('nickname')}, points={info.get('points')}")
-            except Exception as e:
-                logger.debug(f"内部API 用户信息请求异常: {e}")
-
-            # ========== 方式2：RSC 页面解析（兜底） ==========
+                data = resp.json()
+            except Exception:
+                data = {}
+            # 统一解析 response.data / detail / data 结构
+            detail = (data.get('response') or {}).get('data') or data.get('detail') or data.get('data') or {}
+            if not isinstance(detail, dict):
+                detail = {}
+            info = {
+                'id': detail.get('id') or detail.get('member_id'),
+                'nickname': detail.get('nickname') or detail.get('member_name'),
+                'avatar_url': detail.get('avatar_url') or detail.get('gravatar_url'),
+                'created_at': detail.get('created_at'),
+                'points': ((detail.get('user_meta') or {}).get('points')),
+                'signin_days_total': ((detail.get('user_meta') or {}).get('signin_days_total')),
+                'warnings_nums': detail.get('warnings_nums'),
+            }
+            # 若 API 未返回完整信息，尝试 RSC 页面解析
             if not info.get('nickname') or info.get('points') is None or info.get('signin_days_total') is None:
                 try:
                     rsc_headers = {
@@ -800,9 +775,6 @@ class HdhiveSignKB(_PluginBase):
                         info['avatar_url'] = m_avatar.group(1)
                     if m_created:
                         info['created_at'] = m_created.group(1)
-                    # 输出RSC解析结果便于调试
-                    if info.get('nickname'):
-                        logger.info(f"RSC 兜底解析成功: nickname={info.get('nickname')}, points={info.get('points')}, signin_days={info.get('signin_days_total')}")
                     if (not info.get('nickname') or info.get('points') is None or info.get('signin_days_total') is None) and '"user":' in rsc_text:
                         user_json = self._extract_rsc_object(rsc_text, 'user')
                         if user_json:
@@ -818,12 +790,10 @@ class HdhiveSignKB(_PluginBase):
                                         info['points'] = meta.get('points')
                                     if meta.get('signin_days_total') is not None:
                                         info['signin_days_total'] = meta.get('signin_days_total')
-                                if info.get('nickname'):
-                                    logger.info(f"RSC JSON对象解析成功: nickname={info.get('nickname')}, points={info.get('points')}")
                             except Exception:
                                 pass
-                except Exception as e:
-                    logger.debug(f"RSC 用户页解析异常: {e}")
+                except Exception:
+                    pass
             self.save_data('hdhive_user_info', info)
             return info
         except Exception as e:
@@ -1303,7 +1273,7 @@ class HdhiveSignKB(_PluginBase):
             "username": "",
             "password": "",
             "proxy_mode": "system",
-            "proxy_url": "",
+            "proxy_url": ""
         }
 
     def get_page(self) -> List[dict]:
@@ -1321,30 +1291,6 @@ class HdhiveSignKB(_PluginBase):
             points = user.get('points') if user.get('points') is not None else '—'
             signin_days_total = user.get('signin_days_total') if user.get('signin_days_total') is not None else '—'
             created_at = user.get('created_at') or '—'
-            # 头像处理：无头像或URL无效时使用用户名首字母作为占位
-            _avatar_valid = bool(avatar and avatar.startswith(('http://', 'https://', '/')))
-            _avatar_initial = (nickname or 'U')[0].upper() if nickname and nickname != '—' else 'U'
-            # 构建 VAvatar 的 content
-            if _avatar_valid:
-                # 有效头像：显示图片，加载失败时显示字母占位
-                _avatar_content = [
-                    {'component': 'img',
-                     'props': {'src': avatar, 'alt': nickname,
-                               'onerror': "this.style.display='none';this.nextElementSibling.style.display='flex';"}},
-                    {'component': 'div',
-                     'props': {'style': 'display:none;width:100%;height:100%;border-radius:50%;'
-                                      'background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);'
-                                      'justify-content:center;align-items:center;color:#fff;font-size:24px;'
-                                      'font-weight:bold;',
-                              'class': 'd-flex'},
-                     'text': _avatar_initial}
-                ]
-                _avatar_props = {'size': 64}
-            else:
-                # 无效头像：直接显示首字母圆形占位
-                _avatar_content = [{'component': 'span', 'props': {'style': 'font-size:24px;font-weight:bold;color:#fff'}, 'text': _avatar_initial}]
-                _avatar_props = {'size': 64, 'color': 'primary'}
-            
             info_card = [{
                 'component': 'VCard',
                 'props': {'variant': 'outlined', 'class': 'mb-4'},
@@ -1360,7 +1306,7 @@ class HdhiveSignKB(_PluginBase):
                                     {'component': 'div', 'props': {'class': 'text-caption'}, 'text': f'加入时间：{created_at}'}
                                 ]
                             },
-                            {'component': 'VAvatar', 'props': _avatar_props, 'content': _avatar_content}
+                            {'component': 'VAvatar', 'props': {'size': 64}, 'content': [{'component': 'img', 'props': {'src': avatar, 'alt': nickname}}]}
                         ]
                     },
                     {'component': 'VDivider'},
