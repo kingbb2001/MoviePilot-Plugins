@@ -1,6 +1,6 @@
 """
 影巢签到插件
-版本: 2.2.0
+版本: 2.2.1
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,8 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.2.1: 修复cloudscraper未安装时import直接崩溃导致自动登录完全失败（安全导入+requests回退）
+- v2.2.0: 修复代理保存丢失+Cookie提前刷新+登录流程优化(303处理+CF检测)
 - v2.1.0: 修复：1)用户名/密码保存后重新进入设置不再丢失 2)已签到场景正确识别（手动签过后不再重复重试3次） 3)API返回"已经签到"时标记为成功而非失败
 - v2.0.0: 重大更新：1)添加独立代理配置（支持HTTP/SOCKS5/系统代理/直连） 2)重写自动登录逻辑：使用actionId服务+Server Action方式 3)所有网络请求统一走插件代理配置
 - v1.6.1: 修复插件目录名与ID不匹配导致的404安装失败
@@ -49,7 +51,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.2.0"
+    plugin_version = "2.2.1"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -147,7 +149,7 @@ class HdhiveSignKB(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign v2.2.0 初始化 =============")
+        logger.info("============= hdhivesign v2.2.1 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -1533,17 +1535,17 @@ class HdhiveSignKB(_PluginBase):
             proxies = self._get_proxies()
             login_url = f"{self._base_url}{self._login_page}"
 
-            # 优先使用 requests（cloudscraper 在某些环境不可用，且 API 实测证明 requests 可直接工作）
-            import cloudscraper as _cs_mod
-            has_cloudscraper = True
+            # 优先使用 cloudscraper（如可用），否则回退到 requests
+            # cloudscraper 在 MoviePilot 等环境可能未安装，必须安全导入
+            scraper = requests
+            has_cloudscraper = False
             try:
+                import cloudscraper as _cs_mod
                 scraper = _cs_mod.create_scraper()
+                has_cloudscraper = True
                 logger.info("自动登录: 使用 cloudscraper")
-            except Exception as e:
-                logger.warning(f"cloudscraper 不可用，将使用 requests：{e}")
-                scraper = requests
-                has_cloudscraper = False
-                logger.info("自动登录: 使用 requests")
+            except ImportError:
+                logger.info("自动登录: cloudscraper 未安装，使用 requests（功能等效）")
 
             # ========== 第一步：从 actionId 服务获取 Server Action ID ==========
             action_id = None
