@@ -1,6 +1,6 @@
 """
 影巢签到自用版插件
-版本: 1.1.0
+版本: 1.2.0
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v1.2.0: 添加package.v2.json和诊断日志
 - v1.1.0: 修复插件安装后不显示的问题，添加加载日志和import保护
 - v1.0.0: 基于 madrays 版本修复 Cookie 失效自动登录问题
 - v1.0.0: 初始版本，基于影巢网站结构实现自动签到
@@ -51,7 +52,7 @@ class HdhiveSign(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -89,7 +90,7 @@ class HdhiveSign(_PluginBase):
     _login_page = "/login"
 
     def init_plugin(self, config: dict = None):
-        logger.info("============= 影巢签到自用版 v1.1.0 正在加载 =============")
+        logger.info("============= 影巢签到自用版 v1.2.0 正在加载 =============")
         # 停止现有任务
         self.stop_service()
 
