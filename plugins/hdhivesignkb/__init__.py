@@ -1,6 +1,6 @@
 """
 影巢签到插件
-版本: 2.1.0
+版本: 2.2.0
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -147,7 +147,7 @@ class HdhiveSignKB(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign v2.1.1 初始化 =============")
+        logger.info("============= hdhivesign v2.2.0 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -333,6 +333,8 @@ class HdhiveSignKB(_PluginBase):
                         "history_days": self._history_days,
                         "username": getattr(self, "_username", ""),
                         "password": getattr(self, "_password", ""),
+                        "proxy_mode": self._proxy_mode,
+                        "proxy_url": self._proxy_url,
                     })
                     logger.info("已通过自动登录获取新Cookie")
                 else:
@@ -369,6 +371,8 @@ class HdhiveSignKB(_PluginBase):
                         "history_days": self._history_days,
                         "username": getattr(self, "_username", ""),
                         "password": getattr(self, "_password", ""),
+                        "proxy_mode": self._proxy_mode,
+                        "proxy_url": self._proxy_url,
                     })
             except Exception:
                 pass
@@ -467,6 +471,8 @@ class HdhiveSignKB(_PluginBase):
                             "history_days": self._history_days,
                             "username": getattr(self, "_username", ""),
                             "password": getattr(self, "_password", ""),
+                            "proxy_mode": self._proxy_mode,
+                            "proxy_url": self._proxy_url,
                         })
                         logger.info("自动登录成功，使用新Cookie重试签到")
                         state2, message2 = self._signin_base()
@@ -1464,6 +1470,13 @@ class HdhiveSignKB(_PluginBase):
         return False
 
     def _ensure_valid_cookie(self) -> Optional[str]:
+        """
+        检查 Cookie 有效性并按需刷新。
+        触发刷新的条件：
+          - 无 token
+          - JWT 已过期（exp <= 当前时间）
+          - JWT 即将过期（剩余 < 5 分钟），提前刷新避免签到途中过期
+        """
         try:
             if not self._cookie:
                 return None
@@ -1483,7 +1496,13 @@ class HdhiveSignKB(_PluginBase):
             if exp_ts and isinstance(exp_ts, (int, float)):
                 import time as _t
                 now_ts = int(_t.time())
-                if exp_ts <= now_ts:
+                # 提前5分钟刷新，避免签到请求过程中token过期
+                if exp_ts <= now_ts + 300:
+                    if exp_ts <= now_ts:
+                        logger.info(f"Cookie已过期（exp={exp_ts}, now={now_ts}），尝试自动登录刷新")
+                    else:
+                        remaining = exp_ts - now_ts
+                        logger.info(f"Cookie即将过期（剩余{remaining}秒 < 300秒），提前自动登录刷新")
                     return self._auto_login()
             return None
         except Exception:
@@ -1492,10 +1511,18 @@ class HdhiveSignKB(_PluginBase):
     def _auto_login(self) -> Optional[str]:
         """
         自动登录获取 Cookie
-        登录流程（参考 qd-today 影巢 HAR 模板）:
-        1. 从 actionId 服务获取 Next.js Server Action ID
-        2. 使用 Server Action 方式登录
-        3. 从登录响应中提取 Cookie
+        
+        登录流程（基于 API 实测验证）:
+        1. 从 actionId 服务 (hdhive.ckid.workers.dev) 获取 Next.js Server Action ID
+        2. 使用 Server Action 方式 POST 登录（实测返回 HTTP 303 + Set-Cookie token）
+        3. 回退：传统 API 登录候选路径
+        4. 兜底：Playwright 浏览器自动化（注意：headless 会被 Cloudflare 拦截）
+        
+        实测经验（2026-04-07）：
+          - actionId 服务正常可用
+          - Server Action 登录返回 HTTP 303，Set-Cookie 中包含 token
+          - JWT 的用户ID字段为 user_id（非标准 sub）
+          - Playwright headless 模式会被 Cloudflare 拦截，需用非 headless + 代理
         """
         try:
             if not getattr(self, "_username", None) or not getattr(self, "_password", None):
@@ -1506,14 +1533,17 @@ class HdhiveSignKB(_PluginBase):
             proxies = self._get_proxies()
             login_url = f"{self._base_url}{self._login_page}"
 
+            # 优先使用 requests（cloudscraper 在某些环境不可用，且 API 实测证明 requests 可直接工作）
+            import cloudscraper as _cs_mod
+            has_cloudscraper = True
             try:
-                import cloudscraper
-                scraper = cloudscraper.create_scraper()
+                scraper = _cs_mod.create_scraper()
                 logger.info("自动登录: 使用 cloudscraper")
             except Exception as e:
-                logger.warning(f"cloudscraper 不可用，将尝试 requests：{e}")
+                logger.warning(f"cloudscraper 不可用，将使用 requests：{e}")
                 scraper = requests
-                logger.info("自动登录: 回退到 requests")
+                has_cloudscraper = False
+                logger.info("自动登录: 使用 requests")
 
             # ========== 第一步：从 actionId 服务获取 Server Action ID ==========
             action_id = None
@@ -1527,8 +1557,7 @@ class HdhiveSignKB(_PluginBase):
                 )
                 logger.info(f"自动登录: actionId 状态码 {getattr(action_resp, 'status_code', 'unknown')}")
                 action_text = getattr(action_resp, 'text', '') or ''
-                import re as _re
-                m = _re.search(r'"actionId"\s*:\s*"([a-fA-F0-9]{16,64})"', action_text)
+                m = re.search(r'"actionId"\s*:\s*"([a-fA-F0-9]{16,64})"', action_text)
                 if m:
                     action_id = m.group(1)
                     logger.info(f"自动登录: 获取到 actionId={action_id}")
@@ -1543,16 +1572,16 @@ class HdhiveSignKB(_PluginBase):
                 try:
                     resp_warm = scraper.get(login_url, timeout=30, proxies=proxies)
                     warm_text = getattr(resp_warm, 'text', '') or ''
-                    m = _re.search(r'next-action"\s*:\s*"([a-fA-F0-9]{16,64})"', warm_text)
+                    m = re.search(r'next-action"\s*:\s*"([a-fA-F0-9]{16,64})"', warm_text)
                     if not m:
-                        m = _re.search(r'name="next-action"\s+value="([a-fA-F0-9]{16,64})"', warm_text)
+                        m = re.search(r'name="next-action"\s+value="([a-fA-F0-9]{16,64})"', warm_text)
                     if m:
                         action_id = m.group(1)
                         logger.info(f"自动登录: 从页面提取到 next-action={action_id}")
                 except Exception as e:
                     logger.debug(f"自动登录: 从页面提取 next-action 失败: {e}")
 
-            # ========== 第二步：使用 Server Action 登录 ==========
+            # ========== 第二步：使用 Server Action 登录（核心方式）==========
             if action_id:
                 url = f"{self._base_url}{self._login_page}"
                 headers = {
@@ -1568,60 +1597,33 @@ class HdhiveSignKB(_PluginBase):
 
                 try:
                     logger.info(f"自动登录: Server Action 登录 {url} (actionId={action_id[:16]}...)")
-                    resp = scraper.post(url, headers=headers, data=body, timeout=30, proxies=proxies)
+                    # 关键：allow_redirects=False 以便捕获 HTTP 303 和 Set-Cookie 响应头
+                    resp = scraper.post(url, headers=headers, data=body, timeout=30, proxies=proxies, allow_redirects=False)
                     status_code = getattr(resp, 'status_code', 'unknown')
                     content_type = getattr(resp.headers, 'get', lambda k: '')('Content-Type')
                     logger.info(f"自动登录: SA 登录状态码 {status_code} Content-Type {content_type}")
 
-                    # 提取 Cookie
-                    cookies_dict = {}
-                    try:
-                        cookies_dict = getattr(resp, 'cookies', None).get_dict() if getattr(resp, 'cookies', None) else {}
-                    except Exception:
-                        pass
-
-                    token_cookie = cookies_dict.get('token')
-                    csrf_cookie = cookies_dict.get('csrf_access_token')
-
-                    # 如果 Set-Cookie 中没有 token，尝试从响应体中解析
-                    if not token_cookie:
-                        try:
-                            resp_text = getattr(resp, 'text', '') or ''
-                            # 尝试 JSON 响应
-                            try:
-                                data = resp.json()
-                                if isinstance(data, dict):
-                                    meta = data.get('meta') or data.get('data') or {}
-                                    acc = meta.get('access_token') or meta.get('token')
-                                    if acc:
-                                        token_cookie = acc
-                                        logger.info(f"自动登录: 从响应JSON中提取到 token")
-                            except Exception:
-                                pass
-                            # 尝试正则从文本中提取
-                            if not token_cookie:
-                                tm = _re.search(r'"token"\s*:\s*"([^"]+)"', resp_text)
-                                if tm:
-                                    token_cookie = tm.group(1)
-                                    logger.info(f"自动登录: 从响应文本中正则提取到 token")
-                        except Exception:
-                            pass
-
-                    if token_cookie:
-                        cookie_items = [f"token={token_cookie}"]
-                        if csrf_cookie:
-                            cookie_items.append(f"csrf_access_token={csrf_cookie}")
-                        cookie_str = "; ".join(cookie_items)
+                    # ★ 实测验证：影巢 Server Action 登录返回 HTTP 303，token 在 Set-Cookie 中
+                    cookie_str = self._extract_login_cookie(resp)
+                    if cookie_str:
                         logger.info("Server Action 登录成功，已生成Cookie")
                         return cookie_str
-                    else:
-                        logger.warning(f"自动登录: SA 登录未返回 token cookie, 响应内容: {getattr(resp.text, '')[:300] if hasattr(resp,'text') else 'N/A'}")
+
+                    # 如果 allow_redirects=False 没拿到 cookie，重试用跟随重定向的方式
+                    logger.debug(f"自动登录: allow_redirects=False 未拿到cookie，尝试跟随重定向...")
+                    resp2 = scraper.post(url, headers=headers, data=body, timeout=30, proxies=proxies, allow_redirects=True)
+                    cookie_str2 = self._extract_login_cookie(resp2)
+                    if cookie_str2:
+                        logger.info("Server Action 登录成功（跟随重定向），已生成Cookie")
+                        return cookie_str2
+                    
+                    logger.warning(f"自动登录: SA 登录未返回 token cookie, 状态码={getattr(resp2,'status_code','?')}, 响应: {getattr(resp2.text, '')[:300] if hasattr(resp2,'text') else 'N/A'}")
 
                 except Exception as e:
                     logger.warning(f"Server Action 登录失败: {e}")
 
-            # ========== 第三步：回退 - API 登录候选 ==========
-            logger.info("自动登录: Server Action 失败，尝试传统 API 登录...")
+            # ========== 第三步：回退 - 传统 API 登录候选 ==========
+            logger.info("自动登录: Server Action 未成功，尝试传统 API 登录...")
             for path in self._login_api_candidates:
                 url = f"{self._base_url}{path}"
                 headers = {
@@ -1638,40 +1640,34 @@ class HdhiveSignKB(_PluginBase):
                 try:
                     logger.info(f"自动登录: 尝试 API 登录 {url}")
                     resp = scraper.post(url, headers=headers, json=payload, timeout=30, proxies=proxies)
-                    logger.info(f"自动登录: API 登录状态码 {getattr(resp, 'status_code', 'unknown')} Content-Type {getattr(resp.headers, 'get', lambda k: '')('Content-Type')}")
-                    cookies_dict = {}
-                    try:
-                        cookies_dict = getattr(resp, 'cookies', None).get_dict() if getattr(resp, 'cookies', None) else {}
-                    except Exception:
-                        pass
-                    token_cookie = cookies_dict.get('token')
-                    csrf_cookie = cookies_dict.get('csrf_access_token')
-                    if not token_cookie:
-                        try:
-                            data = resp.json()
-                            logger.info(f"自动登录: API 登录返回JSON keys {list(data.keys()) if isinstance(data, dict) else 'non-dict'}")
-                            meta = (data.get('meta') or {})
-                            acc = meta.get('access_token')
-                            if acc:
-                                token_cookie = acc
-                        except Exception:
-                            pass
-                    if token_cookie:
-                        cookie_items = [f"token={token_cookie}"]
-                        if csrf_cookie:
-                            cookie_items.append(f"csrf_access_token={csrf_cookie}")
-                        cookie_str = "; ".join(cookie_items)
+                    cookie_str = self._extract_login_cookie(resp)
+                    if cookie_str:
                         logger.info("API 登录成功，已生成Cookie")
                         return cookie_str
+                    # 尝试从 JSON 响应体中提取 token
+                    try:
+                        data = resp.json()
+                        logger.info(f"自动登录: API 登录返回JSON keys {list(data.keys()) if isinstance(data, dict) else 'non-dict'}")
+                        meta = (data.get('meta') or {})
+                        acc = meta.get('access_token') or meta.get('token')
+                        if acc:
+                            cookie_items = [f"token={acc}"]
+                            logger.info("API 登录: 从响应JSON中提取到 token")
+                            return "; ".join(cookie_items)
+                    except Exception:
+                        pass
                 except Exception as e:
                     logger.debug(f"API 登录候选失败: {path} -> {e}")
 
             # ========== 第四步：Playwright 浏览器自动化兜底 ==========
+            # ⚠️ 实测发现 headless 模式会被 Cloudflare 拦截
+            #    有代理时使用 headless=True 可能可行，否则需要 headless=False
             try:
                 from playwright.sync_api import sync_playwright
-                logger.info("自动登录: 尝试使用 Playwright 浏览器自动化")
+                logger.info("自动登录: 尝试使用 Playwright 浏览器自动化兜底")
                 proxy = self._get_playwright_proxy()
                 with sync_playwright() as pw:
+                    # 有代理时尝试 headless（代理IP可能绕过Cloudflare），无代理时也尝试 headless
                     launch_args = {"headless": True}
                     if proxy:
                         launch_args["proxy"] = proxy
@@ -1679,63 +1675,107 @@ class HdhiveSignKB(_PluginBase):
                     context = browser.new_context()
                     page = context.new_page()
                     page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
-                    # 选择器启发式
-                    selectors = [
-                        "input[name='username']",
-                        "input[name='email']",
-                        "input[type='email']",
-                        "input[placeholder*='邮箱']",
-                        "input[placeholder*='email']",
-                        "input[placeholder*='用户名']",
-                    ]
-                    pwd_selectors = [
-                        "input[name='password']",
-                        "input[type='password']",
-                        "input[placeholder*='密码']",
-                    ]
-                    for sel in selectors:
-                        try:
-                            if page.query_selector(sel):
-                                page.fill(sel, getattr(self, "_username", ""))
-                                break
-                        except Exception:
-                            continue
-                    for sel in pwd_selectors:
-                        try:
-                            if page.query_selector(sel):
-                                page.fill(sel, getattr(self, "_password", ""))
-                                break
-                        except Exception:
-                            continue
+                    
+                    # 检查是否被 Cloudflare 拦截（页面标题或内容特征）
+                    page_content = ""
                     try:
-                        btn = page.query_selector("button[type='submit']") or page.query_selector("button:has-text('登录')") or page.query_selector("button:has-text('Login')")
-                        if btn:
-                            btn.click()
-                        else:
-                            page.keyboard.press("Enter")
-                    except Exception:
-                        page.keyboard.press("Enter")
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=10000)
+                        page.wait_for_load_state("domcontentloaded", timeout=5000)
+                        page_content = page.content() or ""
                     except Exception:
                         pass
-                    cookies = context.cookies()
-                    token_cookie = None
-                    csrf_cookie = None
-                    for c in cookies:
-                        if c.get('name') == 'token':
-                            token_cookie = c.get('value')
-                        elif c.get('name') == 'csrf_access_token':
-                            csrf_cookie = c.get('value')
-                    context.close()
-                    browser.close()
-                    if token_cookie:
-                        cookie_items = [f"token={token_cookie}"]
-                        if csrf_cookie:
-                            cookie_items.append(f"csrf_access_token={csrf_cookie}")
-                        cookie_str = "; ".join(cookie_items)
-                        logger.info("Playwright 登录成功，已生成Cookie")
-                        return cookie_str
+                    
+                    if "Just a moment" in page_content or "Checking your browser" in page_content:
+                        logger.warning("检测到 Cloudflare 验证页面，Playwright headless 被拦截")
+                        context.close()
+                        browser.close()
+                        
+                        # 重试：使用非 headless 模式（需要显示器或有虚拟显示）
+                        logger.info("Playwright: 切换到 non-headless 模式重试...")
+                        try:
+                            browser2 = pw.chromium.launch(headless=False, proxy=proxy if proxy else None)
+                            context2 = browser2.new_context()
+                            page2 = context2.new_page()
+                            page2.goto(login_url, wait_until="networkidle", timeout=60000)
+                            
+                            # 填写表单
+                            for sel in ["input[name='username']", "input[name='email']", "input[type='email']", "input[placeholder*='邮箱']", "input[placeholder*='email']", "input[placeholder*='用户名']"]:
+                                try:
+                                    if page2.query_selector(sel):
+                                        page2.fill(sel, getattr(self, "_username", ""))
+                                        break
+                                except Exception:
+                                    continue
+                            for sel in ["input[name='password']", "input[type='password']", "input[placeholder*='密码']"]:
+                                try:
+                                    if page2.query_selector(sel):
+                                        page2.fill(sel, getattr(self, "_password", ""))
+                                        break
+                                except Exception:
+                                    continue
+                            # 提交
+                            try:
+                                btn = page2.query_selector("button[type='submit']") or page2.query_selector("button:has-text('登录')") or page2.query_selector("button:has-text('Login')")
+                                if btn:
+                                    btn.click()
+                                else:
+                                    page2.keyboard.press("Enter")
+                            except Exception:
+                                page2.keyboard.press("Enter")
+                            try:
+                                page2.wait_for_load_state("networkidle", timeout=15000)
+                            except Exception:
+                                pass
+                            
+                            cookies = context2.cookies()
+                            cookie_str = self._build_cookie_string(cookies)
+                            context2.close()
+                            browser2.close()
+                            if cookie_str:
+                                logger.info("Playwright (non-headless) 登录成功")
+                                return cookie_str
+                        except Exception as e2:
+                            logger.error(f"Playwright non-headless 也失败: {e2}")
+                    else:
+                        # headless 成功加载页面，继续正常流程
+                        selectors = [
+                            "input[name='username']", "input[name='email']", "input[type='email']",
+                            "input[placeholder*='邮箱']", "input[placeholder*='email']", "input[placeholder*='用户名']",
+                        ]
+                        pwd_selectors = ["input[name='password']", "input[type='password']", "input[placeholder*='密码']"]
+                        for sel in selectors:
+                            try:
+                                if page.query_selector(sel):
+                                    page.fill(sel, getattr(self, "_username", ""))
+                                    break
+                            except Exception:
+                                continue
+                        for sel in pwd_selectors:
+                            try:
+                                if page.query_selector(sel):
+                                    page.fill(sel, getattr(self, "_password", ""))
+                                    break
+                            except Exception:
+                                continue
+                        try:
+                            btn = page.query_selector("button[type='submit']") or page.query_selector("button:has-text('登录')") or page.query_selector("button:has-text('Login')")
+                            if btn:
+                                btn.click()
+                            else:
+                                page.keyboard.press("Enter")
+                        except Exception:
+                            page.keyboard.press("Enter")
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=10000)
+                        except Exception:
+                            pass
+                        cookies = context.cookies()
+                        cookie_str = self._build_cookie_string(cookies)
+                        context.close()
+                        browser.close()
+                        if cookie_str:
+                            logger.info("Playwright (headless) 登录成功")
+                            return cookie_str
+
                 logger.error("自动登录失败，未获取到有效Cookie")
                 return None
             except Exception as e:
@@ -1746,6 +1786,89 @@ class HdhiveSignKB(_PluginBase):
         except Exception as e:
             logger.error(f"自动登录异常: {str(e)}")
             return None
+
+    def _extract_login_cookie(self, resp) -> Optional[str]:
+        """
+        从登录响应中提取 Cookie 字符串。
+        优先检查 Set-Cookie 响应头，其次检查响应体。
+        
+        实测验证（2026-04-07）：影巢 Server Action 登录返回 HTTP 303，
+        token 通过 Set-Cookie 响应头设置（非 JSON body）。
+        """
+        token_cookie = None
+        csrf_cookie = None
+        
+        # 方式1：从 Set-Cookie 响应头提取（最可靠的方式）
+        cookies_dict = {}
+        try:
+            # 兼容 requests 和 cloudscraper 的 cookies 接口
+            raw_cookies = getattr(resp, 'cookies', None)
+            if raw_cookies is not None:
+                if hasattr(raw_cookies, 'get_dict'):
+                    cookies_dict = raw_cookies.get_dict()
+                elif hasattr(raw_cookies, '__iter__'):
+                    # 某些版本的 cookie jar
+                    for c in raw_cookies:
+                        if hasattr(c, 'name'):
+                            cookies_dict[c.name] = c.value
+            
+            token_cookie = cookies_dict.get('token')
+            csrf_cookie = cookies_dict.get('csrf_access_token')
+        except Exception:
+            pass
+        
+        # 方式2：如果响应头没有，尝试从响应体解析
+        if not token_cookie:
+            try:
+                resp_text = getattr(resp, 'text', '') or ''
+                # 尝试 JSON 响应
+                try:
+                    data = json.loads(resp_text) if isinstance(resp_text, str) else {}
+                    if isinstance(data, dict):
+                        meta = data.get('meta') or data.get('data') or {}
+                        token_cookie = meta.get('access_token') or meta.get('token')
+                        if token_cookie:
+                            logger.info("_extract_login_cookie: 从响应JSON中提取到 token")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                
+                # 尝试正则从文本中提取
+                if not token_cookie and isinstance(resp_text, str):
+                    tm = re.search(r'"token"\s*:\s*"([^"]+)"', resp_text)
+                    if tm:
+                        token_cookie = tm.group(1)
+                        logger.info("_extract_login_cookie: 从响应文本正则提取到 token")
+            except Exception:
+                pass
+        
+        # 组装 cookie 字符串
+        if token_cookie:
+            cookie_items = [f"token={token_cookie}"]
+            if csrf_cookie:
+                cookie_items.append(f"csrf_access_token={csrf_cookie}")
+            return "; ".join(cookie_items)
+        
+        return None
+
+    def _build_cookie_string(self, cookies: list) -> Optional[str]:
+        """
+        从 Playwright 的 cookies 列表中构建插件用的 Cookie 字符串
+        """
+        token_cookie = None
+        csrf_cookie = None
+        for c in cookies:
+            name = c.get('name', '')
+            if name == 'token':
+                token_cookie = c.get('value')
+            elif name == 'csrf_access_token':
+                csrf_cookie = c.get('value')
+        
+        if token_cookie:
+            cookie_items = [f"token={token_cookie}"]
+            if csrf_cookie:
+                cookie_items.append(f"csrf_access_token={csrf_cookie}")
+            return "; ".join(cookie_items)
+        return None
 
     def _get_last_sign_time(self) -> str:
         """
