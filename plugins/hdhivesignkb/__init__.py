@@ -1,6 +1,6 @@
 """
 影巢签到插件
-版本: 2.0.0
+版本: 2.1.0
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.1.0: 修复：1)用户名/密码保存后重新进入设置不再丢失 2)已签到场景正确识别（手动签过后不再重复重试3次） 3)API返回"已经签到"时标记为成功而非失败
 - v2.0.0: 重大更新：1)添加独立代理配置（支持HTTP/SOCKS5/系统代理/直连） 2)重写自动登录逻辑：使用actionId服务+Server Action方式 3)所有网络请求统一走插件代理配置
 - v1.6.1: 修复插件目录名与ID不匹配导致的404安装失败
 - v1.4.0: 修复插件市场注册问题（添加根目录 package.json）
@@ -48,7 +49,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.0.0"
+    plugin_version = "2.1.0"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -146,7 +147,7 @@ class HdhiveSignKB(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign 初始化 =============")
+        logger.info("============= hdhivesign v2.1.1 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -192,6 +193,8 @@ class HdhiveSignKB(_PluginBase):
                     "max_retries": self._max_retries,
                     "retry_interval": self._retry_interval,
                     "history_days": self._history_days,
+                    "username": getattr(self, "_username", ""),
+                    "password": getattr(self, "_password", ""),
                     "proxy_mode": self._proxy_mode,
                     "proxy_url": self._proxy_url
                 })
@@ -431,8 +434,21 @@ class HdhiveSignKB(_PluginBase):
                 self._send_sign_notification(sign_dict)
                 return sign_dict
             else:
-                # 签到失败, a real failure that needs retry
+                # 签到返回非成功
                 logger.error(f"影巢签到失败: {message}")
+
+                # ★ 关键修复：检测消息是否表明"已经签到过了"，如果是则视为成功，不重试
+                if "已经签到" in (message or "") or "签到过" in (message or "") or "重复签到" in (message or "") or "今日已签" in (message or ""):
+                    logger.info(f"API返回消息表明今日已签到（消息: {message}），标记为'已签到'，不重试")
+                    sign_status = "已签到"
+                    sign_dict = {
+                        "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
+                        "status": sign_status,
+                        "message": message,
+                    }
+                    self._save_sign_history(sign_dict)
+                    self._send_sign_notification(sign_dict)
+                    return sign_dict
 
                 # 检测鉴权失败，尝试自动登录刷新 Cookie 后重试一次
                 if any(k in (message or "") for k in ["未配置Cookie", "缺少'token'", "未授权", "Unauthorized", "token", "csrf", "登录已过期", "过期", "expired"]):
@@ -541,6 +557,10 @@ class HdhiveSignKB(_PluginBase):
     def _signin_base(self) -> Tuple[bool, str]:
         """
         基于影巢API的签到实现
+        API返回格式 (实测确认):
+          成功: {"success": true, "message": "获得 XX 积分", ...}
+          已签到: {"success": false, "message": "签到失败", "description": "你已经签到过了，明天再来吧", "code": "400"}
+          失败: {"success": false, "message": "...", "description": "...", "code": "400/500"}
         """
         try:
             cookies = {}
@@ -558,11 +578,13 @@ class HdhiveSignKB(_PluginBase):
             if not token:
                 return False, "Cookie中缺少'token'"
 
+            # 解析用户ID：影巢JWT的user_id字段在payload中叫"user_id"而非"sub"
             user_id = None
             referer = self._site_url
             try:
                 decoded_token = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
-                user_id = decoded_token.get('sub')
+                # 优先用 user_id 字段（影巢实际使用的），回退到 sub
+                user_id = decoded_token.get('user_id') or decoded_token.get('sub')
                 if user_id:
                     referer = f"{self._base_url}/user/{user_id}"
             except Exception as e:
@@ -600,23 +622,36 @@ class HdhiveSignKB(_PluginBase):
                 return False, f'签到API响应格式错误，状态码: {signin_res.status_code}'
 
             message = signin_result.get('message', '无明确消息')
+            description = signin_result.get('description', '')  # 影巢API有description字段，包含详细信息
+            code = signin_result.get('code', '')
+            
+            # 构造完整的显示消息（message + description）
+            display_message = message
+            if description and description != message:
+                display_message = f"{message} ({description})"
             
             if signin_result.get('success'):
                 try:
                     self._fetch_user_info(cookies, token)
                 except Exception:
                     pass
-                return True, message
+                return True, display_message
 
-            if "已经签到" in message or "签到过" in message:
+            # ★ 关键修复：检测"已签到"状态
+            # 影巢API在已签到时返回 success=false, 但 message 或 description 中包含"已签到"相关文字
+            signed_keywords = ["已经签到", "签到过", "重复签到", "今日已签", "已经签过", "明日再来"]
+            combined_text = f"{message} {description}".lower()
+            is_already_signed = any(kw in message or kw in description for kw in signed_keywords)
+            
+            if is_already_signed:
                 try:
                     self._fetch_user_info(cookies, token)
                 except Exception:
                     pass
-                return True, message 
+                return True, display_message
 
-            logger.error(f"签到失败, HTTP状态码: {signin_res.status_code}, 消息: {message}")
-            return False, message
+            logger.error(f"签到失败, HTTP状态码: {signin_res.status_code}, 消息: {display_message}")
+            return False, display_message
 
         except Exception as e:
             logger.error(f"签到流程发生未知异常", exc_info=True)
@@ -667,7 +702,7 @@ class HdhiveSignKB(_PluginBase):
             referer = self._site_url
             try:
                 decoded_token = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
-                user_id = decoded_token.get('sub')
+                user_id = decoded_token.get('user_id') or decoded_token.get('sub')  # 影巢用user_id字段
                 if user_id:
                     referer = f"{self._base_url}/user/{user_id}"
             except Exception:
@@ -1407,17 +1442,26 @@ class HdhiveSignKB(_PluginBase):
     def _is_already_signed_today(self) -> bool:
         """
         检查今天是否已经签到成功
+        包括：插件自动签到成功、手动签到后API返回已签到、以及历史中的失败记录但消息表明实际已签到
         """
         history = self.get_data('sign_history') or []
         if not history:
             return False
         today = datetime.now().strftime('%Y-%m-%d')
         # 查找今日是否有成功签到记录
-        return any(
-            record.get("date", "").startswith(today)
-            and record.get("status") in ["签到成功", "已签到"]
-            for record in history
-        )
+        for record in history:
+            if not record.get("date", "").startswith(today):
+                continue
+            status = record.get("status", "")
+            message = record.get("message", "")
+            # 明确的成功状态
+            if status in ["签到成功", "已签到", "跳过: 今日已签到"]:
+                return True
+            # 失败记录但消息表明实际上已经签到过了（比如用户手动签过后插件再去签）
+            if "签到失败" in status and ("已经签到" in message or "签到过" in message):
+                logger.info(f"检测到今日有'已签到'含义的历史记录（状态={status}, 消息={message}），标记为已签到")
+                return True
+        return False
 
     def _ensure_valid_cookie(self) -> Optional[str]:
         try:
