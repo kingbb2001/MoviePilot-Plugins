@@ -1,6 +1,6 @@
 """
 影巢签到插件
-版本: 2.3.2
+版本: 2.3.3
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.3.3: 新增Open API Key配置项，Open API回到首选并支持API Key认证获取完整用户信息
 - v2.3.2: 优化用户信息获取策略（内部API优先+Open API降次选+404静默+RSC增强日志）
 - v2.3.1: 补充版本历史记录完整性（补全v1.5.0/v1.6.0/v2.1.1/v2.2.2缺失条目）+版本号递增确保插件市场可识别更新
 - v2.3.0: 新增Open API用户信息获取（多路径探测）+头像显示优化（无效URL自动降级为字母占位符）
@@ -58,7 +59,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.3.2"
+    plugin_version = "2.3.3"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -169,7 +170,7 @@ class HdhiveSignKB(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign v2.3.2 初始化 =============")
+        logger.info("============= hdhivesign v2.3.3 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -191,7 +192,9 @@ class HdhiveSignKB(_PluginBase):
                 # 代理配置
                 self._proxy_mode = config.get("proxy_mode") or "system"
                 self._proxy_url = (config.get("proxy_url") or "").strip()
-                logger.info(f"影巢签到插件已加载，配置：enabled={self._enabled}, notify={self._notify}, cron={self._cron}, proxy_mode={self._proxy_mode}")
+                # Open API 配置
+                self._open_api_key = (config.get("open_api_key") or "").strip()
+                logger.info(f"影巢签到插件已加载，配置：enabled={self._enabled}, notify={self._notify}, cron={self._cron}, proxy_mode={self._proxy_mode}, open_api_key={'已配置' if self._open_api_key else '未配置'}")
                 logger.info(f"影巢签到插件已加载，配置：enabled={self._enabled}, notify={self._notify}, cron={self._cron}")
             
             # 清理所有可能的延长重试任务
@@ -218,7 +221,8 @@ class HdhiveSignKB(_PluginBase):
                     "username": getattr(self, "_username", ""),
                     "password": getattr(self, "_password", ""),
                     "proxy_mode": self._proxy_mode,
-                    "proxy_url": self._proxy_url
+                    "proxy_url": self._proxy_url,
+                    "open_api_key": getattr(self, "_open_api_key", ""),
                 })
 
                 # 启动任务
@@ -728,8 +732,8 @@ class HdhiveSignKB(_PluginBase):
     def _fetch_user_info(self, cookies: Dict[str, str], token: str) -> Optional[dict]:
         """
         获取用户信息，按优先级尝试多种方式：
-        1. 内部 API（/api/customer/user/info）— 原有接口
-        2. Open API（/api/open/user/me）— 第三方接口（部分站点可能未部署）
+        1. Open API（/api/open/user/me）— 官方第三方接口，需要 API Key
+        2. 内部 API（/api/customer/user/info）— 原有接口，Cookie 认证
         3. RSC 页面解析 — 兜底方案
         """
         try:
@@ -744,44 +748,11 @@ class HdhiveSignKB(_PluginBase):
 
             info = {}
             proxies = self._get_proxies()
+            open_api_key = getattr(self, '_open_api_key', '')
 
-            # ========== 方式1：内部 API（原有逻辑，优先） ==========
-            if not info.get('nickname'):
-                try:
-                    headers = {
-                        'User-Agent': settings.USER_AGENT,
-                        'Accept': 'application/json, text/plain, */*',
-                        'Origin': self._base_url,
-                        'Referer': referer,
-                        'Authorization': f'Bearer {token}',
-                    }
-                    resp = requests.get(self._user_info_api, headers=headers, cookies=cookies, proxies=proxies, timeout=30, verify=False)
-                    logger.info(f"内部API 用户信息 状态码: {getattr(resp,'status_code','unknown')} CT: {getattr(resp.headers,'get',lambda k:'' )('Content-Type')}")
-                    if getattr(resp, 'status_code', None) == 200:
-                        data = {}
-                        try:
-                            data = resp.json()
-                        except Exception:
-                            data = {}
-                        detail = (data.get('response') or {}).get('data') or data.get('detail') or data.get('data') or {}
-                        if not isinstance(detail, dict):
-                            detail = {}
-                        if detail.get('nickname') or detail.get('member_name'):
-                            info.update({
-                                'id': detail.get('id') or detail.get('member_id') or info.get('id'),
-                                'nickname': detail.get('nickname') or detail.get('member_name') or info.get('nickname'),
-                                'avatar_url': detail.get('avatar_url') or detail.get('gravatar_url') or info.get('avatar_url', ''),
-                                'created_at': detail.get('created_at') or info.get('created_at'),
-                                'points': ((detail.get('user_meta') or {}).get('points')) if info.get('points') is None else info.get('points'),
-                                'signin_days_total': ((detail.get('user_meta') or {}).get('signin_days_total')) if info.get('signin_days_total') is None else info.get('signin_days_total'),
-                                'warnings_nums': detail.get('warnings_nums'),
-                            })
-                            logger.info(f"内部API 用户信息获取成功: nickname={info.get('nickname')}, points={info.get('points')}")
-                except Exception as e:
-                    logger.debug(f"内部API 用户信息请求异常: {e}")
-
-            # ========== 方式2：Open API（官方第三方接口，可能未部署，降级为次选） ==========
-            if not info.get('nickname') or info.get('points') is None or info.get('signin_days_total') is None:
+            # ========== 方式1：Open API（官方推荐，优先尝试） ==========
+            if open_api_key:
+                logger.info("Open API: 检测到已配置 API Key，开始尝试 Open API 获取用户信息")
                 open_api_paths = self._user_info_open_apis
                 for api_path in open_api_paths:
                     url = f"{self._base_url}{api_path}"
@@ -791,16 +762,12 @@ class HdhiveSignKB(_PluginBase):
                             'Accept': 'application/json',
                             'Origin': self._base_url,
                             'Referer': referer,
-                            'Authorization': f'Bearer {token}',
+                            'Authorization': f'Bearer {open_api_key}',
+                            'X-API-Key': open_api_key,
                         }
                         resp = requests.get(url, headers=headers, cookies=cookies, proxies=proxies, timeout=30, verify=False)
                         status_code = getattr(resp, 'status_code', None)
-                        # 仅在非404时记录日志，404说明该API路径未部署，避免刷屏
-                        if status_code == 200:
-                            logger.info(f"Open API 用户信息 [{api_path}] 状态码: {status_code}")
-                        elif status_code != 404:
-                            logger.debug(f"Open API 用户信息 [{api_path}] 状态码: {status_code}")
-                        # else: 404 静默跳过，不输出日志
+                        logger.info(f"Open API 用户信息 [{api_path}] 状态码: {status_code}")
                         if status_code == 200:
                             data = {}
                             try:
@@ -836,9 +803,56 @@ class HdhiveSignKB(_PluginBase):
                                     'signin_days_total': detail.get('signin_days_total'),
                                     'warnings_nums': detail.get('warnings_nums'),
                                 }
+                                logger.info(f"Open API 用户信息获取成功(alt): nickname={info.get('nickname')}, points={info.get('points')}")
                                 break
+                        elif status_code == 401:
+                            logger.warning(f"Open API [{api_path}] 返回 401 未授权，请检查 API Key 是否正确")
+                        elif status_code == 403:
+                            logger.warning(f"Open API [{api_path}] 返回 403 无权限，该 API Key 可能无权访问此接口")
                     except Exception as e:
                         logger.debug(f"Open API [{api_path}] 请求异常: {e}")
+                
+                if info.get('nickname'):
+                    # Open API 已成功拿到数据，直接返回
+                    self.save_data('hdhive_user_info', info)
+                    return info
+            else:
+                logger.info("Open API: 未配置 API Key，跳过 Open API 尝试")
+
+            # ========== 方式2：内部 API（Cookie/Token 认证） ==========
+            if not info.get('nickname'):
+                try:
+                    headers = {
+                        'User-Agent': settings.USER_AGENT,
+                        'Accept': 'application/json, text/plain, */*',
+                        'Origin': self._base_url,
+                        'Referer': referer,
+                        'Authorization': f'Bearer {token}',
+                    }
+                    resp = requests.get(self._user_info_api, headers=headers, cookies=cookies, proxies=proxies, timeout=30, verify=False)
+                    logger.info(f"内部API 用户信息 状态码: {getattr(resp,'status_code','unknown')} CT: {getattr(resp.headers,'get',lambda k:'' )('Content-Type')}")
+                    if getattr(resp, 'status_code', None) == 200:
+                        data = {}
+                        try:
+                            data = resp.json()
+                        except Exception:
+                            data = {}
+                        detail = (data.get('response') or {}).get('data') or data.get('detail') or data.get('data') or {}
+                        if not isinstance(detail, dict):
+                            detail = {}
+                        if detail.get('nickname') or detail.get('member_name'):
+                            info.update({
+                                'id': detail.get('id') or detail.get('member_id') or info.get('id'),
+                                'nickname': detail.get('nickname') or detail.get('member_name') or info.get('nickname'),
+                                'avatar_url': detail.get('avatar_url') or detail.get('gravatar_url') or info.get('avatar_url', ''),
+                                'created_at': detail.get('created_at') or info.get('created_at'),
+                                'points': ((detail.get('user_meta') or {}).get('points')) if info.get('points') is None else info.get('points'),
+                                'signin_days_total': ((detail.get('user_meta') or {}).get('signin_days_total')) if info.get('signin_days_total') is None else info.get('signin_days_total'),
+                                'warnings_nums': detail.get('warnings_nums'),
+                            })
+                            logger.info(f"内部API 用户信息获取成功: nickname={info.get('nickname')}, points={info.get('points')}")
+                except Exception as e:
+                    logger.debug(f"内部API 用户信息请求异常: {e}")
 
             # ========== 方式3：RSC 页面解析（兜底） ==========
             if not info.get('nickname') or info.get('points') is None or info.get('signin_days_total') is None:
@@ -1224,6 +1238,25 @@ class HdhiveSignKB(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
+                                'props': {'cols': 12},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'open_api_key',
+                                            'label': 'Open API Key（可选，用于获取用户信息）',
+                                            'placeholder': '从影巢开发者设置中获取的 API Key，填写后可获取完整用户头像/积分等信息'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
                                 'props': {
                                     'cols': 12,
                                     'md': 4
@@ -1374,7 +1407,8 @@ class HdhiveSignKB(_PluginBase):
             "username": "",
             "password": "",
             "proxy_mode": "system",
-            "proxy_url": ""
+            "proxy_url": "",
+            "open_api_key": ""
         }
 
     def get_page(self) -> List[dict]:
