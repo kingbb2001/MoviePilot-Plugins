@@ -1,6 +1,6 @@
 """
 影巢签到插件
-版本: 2.3.6
+版本: 2.3.7
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.3.7: 修复VAvatar组件嵌套三元表达式括号混乱导致插件加载后立即停止（从v2.3.0移植时误用了未修复的原始代码）
 - v2.3.6: 新增头像显示优化（无效URL自动降级为渐变背景字母占位符），从v2.3.0移植不含Open API依赖
 - v2.3.5: 回退到v2.2.2稳定基线代码，移除v2.3.0-v2.3.4期间添加的全部Open API相关功能（Open API为Premium专属，免费用户不可用）
 - v2.2.2: 修复签到重复执行检测+延长重试任务冲突+通知模板美化（用户信息卡片集成）
@@ -54,7 +55,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.3.6"
+    plugin_version = "2.3.7"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -152,7 +153,7 @@ class HdhiveSignKB(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign v2.3.6 初始化 =============")
+        logger.info("============= hdhivesign v2.3.7 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -1295,6 +1296,27 @@ class HdhiveSignKB(_PluginBase):
             # 头像处理：无头像或URL无效时使用用户名首字母作为占位
             _avatar_valid = bool(avatar and avatar.startswith(('http://', 'https://', '/')))
             _avatar_initial = (nickname or 'U')[0].upper() if nickname and nickname != '—' else 'U'
+            # 构建 VAvatar 的 content（使用 if/else 预构建，避免嵌套三元导致括号混乱）
+            if _avatar_valid:
+                # 有效头像：显示图片，加载失败时显示字母占位
+                _avatar_content = [
+                    {'component': 'img',
+                     'props': {'src': avatar, 'alt': nickname,
+                               'onerror': "this.style.display='none';this.nextElementSibling.style.display='flex';"}},
+                    {'component': 'div',
+                     'props': {'style': 'display:none;width:100%;height:100%;border-radius:50%;'
+                                      'background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);'
+                                      'justify-content:center;align-items:center;color:#fff;font-size:24px;'
+                                      'font-weight:bold;',
+                              'class': 'd-flex'},
+                     'text': _avatar_initial}
+                ]
+                _avatar_props = {'size': 64}
+            else:
+                # 无效头像：直接显示首字母圆形占位
+                _avatar_content = [{'component': 'span', 'props': {'style': 'font-size:24px;font-weight:bold;color:#fff;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);border-radius:50%;width:64px;height:64px;display:flex;justify-content:center;align-items:center;'}, 'text': _avatar_initial}]
+                _avatar_props = {'size': 64, 'color': 'primary'}
+            
             info_card = [{
                 'component': 'VCard',
                 'props': {'variant': 'outlined', 'class': 'mb-4'},
@@ -1310,23 +1332,7 @@ class HdhiveSignKB(_PluginBase):
                                     {'component': 'div', 'props': {'class': 'text-caption'}, 'text': f'加入时间：{created_at}'}
                                 ]
                             },
-                            # 有有效头像URL时显示图片，否则显示首字母圆形占位
-                            {'component': 'VAvatar',
-                             'props': {'size': 64},
-                             'content': (
-                                 [{'component': 'img',
-                                   'props': {'src': avatar, 'alt': nickname,
-                                             'onerror': "this.style.display='none';this.nextElementSibling.style.display='flex';"},
-                                  },
-                                  {'component': 'div',
-                                   'props': {'style': 'display:none;width:100%;height:100%;border-radius:50%;'
-                                                    'background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);'
-                                                    'justify-content:center;align-items:center;color:#fff;font-size:24px;'
-                                                    'font-weight:bold;',
-                                            'class': 'd-flex'},
-                                   'text': _avatar_initial}
-                                 ] if _avatar_valid else [_avatar_initial])
-                             } if _avatar_valid else [{'component': 'span', 'props': {'style': 'font-size:24px;font-weight:bold;color:#fff;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);border-radius:50%;width:64px;height:64px;display:flex;justify-content:center;align-items:center;'}, 'text': _avatar_initial}]
+                            {'component': 'VAvatar', 'props': _avatar_props, 'content': _avatar_content}
                         ]
                     },
                     {'component': 'VDivider'},
