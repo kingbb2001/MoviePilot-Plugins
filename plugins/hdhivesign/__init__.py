@@ -1,7 +1,7 @@
 """
-影巢签到自用版插件
-版本: 1.5.0
-作者: kingbb2001
+影巢签到插件
+版本: 1.3.0
+作者: madrays
 功能:
 - 自动完成影巢(HDHive)每日签到
 - 支持签到失败重试
@@ -10,12 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
-- v1.5.0: 修复get_page缩进错误，所有import加保护，彻底解决加载崩溃问题
-- v1.4.0: 彻底修复插件崩溃问题，添加完整异常保护和属性初始化
-- v1.3.0: 移除package.v2.json避免404错误
-- v1.2.0: 添加package.v2.json和诊断日志
-- v1.1.0: 修复插件安装后不显示的问题，添加加载日志和import保护
-- v1.0.0: 基于 madrays 版本修复 Cookie 失效自动登录问题
+- v1.1.0: 域名改为可配置，统一API拼接(Referer/Origin/接口)，精简日志
 - v1.0.0: 初始版本，基于影巢网站结构实现自动签到
 """
 import time
@@ -24,62 +19,35 @@ import re
 import json
 from datetime import datetime, timedelta
 
-# 所有可选依赖都做延迟/安全导入
-try:
-    import jwt
-except ImportError:
-    jwt = None
-try:
-    import pytz
-except ImportError:
-    pytz = None
-try:
-    from apscheduler.schedulers.background import BackgroundScheduler
-    from apscheduler.triggers.cron import CronTrigger
-except ImportError:
-    BackgroundScheduler = None
-    CronTrigger = None
+import jwt
+import pytz
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
-try:
-    from app.core.config import settings
-except Exception:
-    settings = None
+from app.core.config import settings
 from app.plugins import _PluginBase
 from typing import Any, List, Dict, Tuple, Optional
-try:
-    from app.log import logger
-except Exception:
-    import logging
-    logger = logging.getLogger(__name__)
-try:
-    from app.schemas import NotificationType
-except Exception:
-    NotificationType = None
-try:
-    from app.utils.http import RequestUtils
-except Exception:
-    RequestUtils = None
+from app.log import logger
+from app.schemas import NotificationType
+from app.utils.http import RequestUtils
 
-try:
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-except Exception:
-    pass
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class HdhiveSign(_PluginBase):
     # 插件名称
-    plugin_name = "影巢签到自用版"
+    plugin_name = "影巢签到"
     # 插件描述
     plugin_desc = "自动完成影巢(HDHive)每日签到，支持失败重试和历史记录"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
+    plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "1.5.0"
+    plugin_version = "1.3.0"
     # 插件作者
-    plugin_author = "kingbb2001"
+    plugin_author = "madrays"
     # 作者主页
-    author_url = "https://github.com/kingbb2001"
+    author_url = "https://github.com/madrays"
     # 插件配置项ID前缀
     plugin_config_prefix = "hdhivesign_"
     # 加载顺序
@@ -97,44 +65,26 @@ class HdhiveSign(_PluginBase):
     _retry_interval = 30  # 重试间隔(秒)
     _history_days = 30  # 历史保留天数
     _manual_trigger = False
-    # 用户名密码（用于自动登录）
-    _username = ""
-    _password = ""
     # 定时器
-    _scheduler = None
+    _scheduler: Optional[BackgroundScheduler] = None
     _current_trigger_type = None  # 保存当前执行的触发类型
 
     # 影巢站点配置（域名可配置）
     _base_url = "https://hdhive.com"
-    _site_url = ""
-    _signin_api = ""
-    _user_info_api = ""
+    _site_url = f"{_base_url}/"
+    _signin_api = f"{_base_url}/api/customer/user/checkin"
+    _user_info_api = f"{_base_url}/api/customer/user/info"
     _login_api_candidates = [
         "/api/customer/user/login",
         "/api/customer/auth/login",
     ]
     _login_page = "/login"
 
-    def __init__(self):
-        super().__init__()
-        # 在构造函数中初始化动态URL
-        self._site_url = f"{self._base_url}/"
-        self._signin_api = f"{self._base_url}/api/customer/user/checkin"
-        self._user_info_api = f"{self._base_url}/api/customer/user/info"
-
     def init_plugin(self, config: dict = None):
-        try:
-            logger.info("============= 影巢签到自用版 v1.5.0 正在加载 =============")
-        except Exception:
-            pass
         # 停止现有任务
         self.stop_service()
 
-        try:
-            logger.info("============= hdhivesign 初始化开始 =============")
-        except Exception:
-            pass
-
+        logger.info("============= hdhivesign 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -143,8 +93,7 @@ class HdhiveSign(_PluginBase):
                 self._cron = config.get("cron")
                 self._onlyonce = config.get("onlyonce")
                 # 新增：站点地址配置
-                base = (config.get("base_url") or self._base_url or "").rstrip("/") or "https://hdhive.com"
-                self._base_url = base
+                self._base_url = (config.get("base_url") or self._base_url or "").rstrip("/") or "https://hdhive.com"
                 # 基于 base_url 统一构建接口地址
                 self._site_url = f"{self._base_url}/"
                 self._signin_api = f"{self._base_url}/api/customer/user/checkin"
@@ -154,61 +103,38 @@ class HdhiveSign(_PluginBase):
                 self._history_days = int(config.get("history_days", 30))
                 self._username = (config.get("username") or "").strip()
                 self._password = (config.get("password") or "").strip()
-                try:
-                    logger.info(f"影巢签到自用版插件已加载，配置：enabled={self._enabled}, notify={self._notify}, cron={self._cron}")
-                except Exception:
-                    pass
+                logger.info(f"影巢签到插件已加载，配置：enabled={self._enabled}, notify={self._notify}, cron={self._cron}")
             
             # 清理所有可能的延长重试任务
             self._clear_extended_retry_tasks()
             
             if self._onlyonce:
-                try:
-                    logger.info("执行一次性签到")
-                except Exception:
-                    pass
-                if BackgroundScheduler is not None and settings is not None:
-                    try:
-                        tz = pytz.timezone(settings.TZ) if pytz else None
-                        self._scheduler = BackgroundScheduler(timezone=settings.TZ)
-                        self._manual_trigger = True
-                        run_date = datetime.now(tz=tz) + timedelta(seconds=3) if tz else datetime.now() + timedelta(seconds=3)
-                        self._scheduler.add_job(func=self.sign, trigger='date',
-                                            run_date=run_date,
-                                            name="影巢签到")
-                        self._onlyonce = False
-                        self.update_config({
-                            "onlyonce": False,
-                            "enabled": self._enabled,
-                            "cookie": self._cookie,
-                            "notify": self._notify,
-                            "cron": self._cron,
-                            "base_url": self._base_url,
-                            "max_retries": self._max_retries,
-                            "retry_interval": self._retry_interval,
-                            "history_days": self._history_days
-                        })
+                logger.info("执行一次性签到")
+                self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+                self._manual_trigger = True
+                self._scheduler.add_job(func=self.sign, trigger='date',
+                                    run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
+                                    name="影巢签到")
+                self._onlyonce = False
+                self.update_config({
+                    "onlyonce": False,
+                    "enabled": self._enabled,
+                    "cookie": self._cookie,
+                    "notify": self._notify,
+                    "cron": self._cron,
+                    "base_url": self._base_url,
+                    "max_retries": self._max_retries,
+                    "retry_interval": self._retry_interval,
+                    "history_days": self._history_days
+                })
 
-                        # 启动任务
-                        if self._scheduler.get_jobs():
-                            self._scheduler.print_jobs()
-                            self._scheduler.start()
-                    except Exception as e:
-                        try:
-                            logger.error(f"一次性签到任务创建失败: {str(e)}")
-                        except Exception:
-                            pass
+                # 启动任务
+                if self._scheduler.get_jobs():
+                    self._scheduler.print_jobs()
+                    self._scheduler.start()
 
         except Exception as e:
-            try:
-                logger.error(f"hdhivesign初始化错误: {str(e)}", exc_info=True)
-            except Exception:
-                pass
-
-        try:
-            logger.info("============= hdhivesign 初始化完成 =============")
-        except Exception:
-            pass
+            logger.error(f"hdhivesign初始化错误: {str(e)}", exc_info=True)
 
     def sign(self, retry_count=0, extended_retry=0):
         """
@@ -227,19 +153,14 @@ class HdhiveSign(_PluginBase):
         # 如果是定时任务且不是重试，检查是否有正在运行的延长重试任务
         if retry_count == 0 and extended_retry == 0 and not self._is_manual_trigger():
             if self._has_running_extended_retry():
-                try:
-                    logger.warning("检测到有正在运行的延长重试任务，跳过本次执行")
-                except Exception:
-                    pass
+                logger.warning("检测到有正在运行的延长重试任务，跳过本次执行")
                 return {
                     "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
                     "status": "跳过: 有正在进行的重试任务"
                 }
         
-        try:
-            logger.info("开始影巢签到")
-        except Exception:
-            pass
+        logger.info("开始影巢签到")
+        logger.debug(f"参数: retry={retry_count}, ext_retry={extended_retry}, trigger={self._current_trigger_type}")
 
         notification_sent = False  # 标记是否已发送通知
         sign_dict = None
@@ -247,22 +168,13 @@ class HdhiveSign(_PluginBase):
 
         # 根据重试情况记录日志
         if retry_count > 0:
-            try:
-                logger.debug(f"常规重试: 第{retry_count}次")
-            except Exception:
-                pass
+            logger.debug(f"常规重试: 第{retry_count}次")
         if extended_retry > 0:
-            try:
-                logger.debug(f"延长重试: 第{extended_retry}次")
-            except Exception:
-                pass
+            logger.debug(f"延长重试: 第{extended_retry}次")
         
         try:
             if not self._is_manual_trigger() and self._is_already_signed_today():
-                try:
-                    logger.info("根据历史记录，今日已成功签到，跳过本次执行")
-                except Exception:
-                    pass
+                logger.info("根据历史记录，今日已成功签到，跳过本次执行")
                 
                 # 创建跳过记录
                 sign_dict = {
@@ -314,15 +226,11 @@ class HdhiveSign(_PluginBase):
                     
                     text += f"━━━━━━━━━━"
                     
-                    try:
-                        if NotificationType is not None:
-                            self.post_message(
-                                mtype=NotificationType.SiteMessage,
-                                title=title,
-                                text=text
-                            )
-                    except Exception:
-                        pass
+                    self.post_message(
+                        mtype=NotificationType.SiteMessage,
+                        title=title,
+                        text=text
+                    )
                 try:
                     cookies = {}
                     if self._cookie:
@@ -355,15 +263,9 @@ class HdhiveSign(_PluginBase):
                         "username": getattr(self, "_username", ""),
                         "password": getattr(self, "_password", ""),
                     })
-                    try:
-                        logger.info("已通过自动登录获取新Cookie")
-                    except Exception:
-                        pass
+                    logger.info("已通过自动登录获取新Cookie")
                 else:
-                    try:
-                        logger.error("未配置Cookie且自动登录失败")
-                    except Exception:
-                        pass
+                    logger.error("未配置Cookie且自动登录失败")
                     sign_dict = {
                         "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
                         "status": "签到失败: 未配置Cookie",
@@ -371,22 +273,15 @@ class HdhiveSign(_PluginBase):
                     self._save_sign_history(sign_dict)
                     
                     if self._notify:
-                        try:
-                            if NotificationType is not None:
-                                self.post_message(
-                                    mtype=NotificationType.SiteMessage,
-                                    title="【影巢签到失败】",
-                                    text="❌ 未配置Cookie，且自动登录失败，请在设置中添加Cookie或用户名密码"
-                                )
-                        except Exception:
-                            pass
+                        self.post_message(
+                            mtype=NotificationType.SiteMessage,
+                            title="【影巢签到失败】",
+                            text="❌ 未配置Cookie，且自动登录失败，请在设置中添加Cookie或用户名密码"
+                        )
                         notification_sent = True
                     return sign_dict
             
-            try:
-                logger.info("执行签到...")
-            except Exception:
-                pass
+            logger.info("执行签到...")
 
             try:
                 ensured = self._ensure_valid_cookie()
@@ -416,31 +311,22 @@ class HdhiveSign(_PluginBase):
                             cookies[name] = value
                 token = cookies.get('token')
                 if token:
-                    try:
-                        logger.info("尝试预拉取用户信息用于页面展示")
-                    except Exception:
-                        pass
+                    logger.info("尝试预拉取用户信息用于页面展示")
                     self._fetch_user_info(cookies, token)
             except Exception:
                 pass
             
-            state, message, auth_failed = self._signin_base()
+            state, message = self._signin_base()
             
             if state:
-                try:
-                    logger.debug(f"签到API消息: {message}")
-                except Exception:
-                    pass
+                logger.debug(f"签到API消息: {message}")
                 
                 if "已经签到" in message or "签到过" in message:
                     sign_status = "已签到"
                 else:
                     sign_status = "签到成功"
                 
-                try:
-                    logger.debug(f"签到状态: {sign_status}")
-                except Exception:
-                    pass
+                logger.debug(f"签到状态: {sign_status}")
 
                 # --- 核心修复：插件自身逻辑计算连续签到天数 ---
                 today_str = datetime.now().strftime('%Y-%m-%d')
@@ -478,17 +364,11 @@ class HdhiveSign(_PluginBase):
                 return sign_dict
             else:
                 # 签到失败, a real failure that needs retry
-                try:
-                    logger.error(f"影巢签到失败: {message}")
-                except Exception:
-                    pass
+                logger.error(f"影巢签到失败: {message}")
 
-                # 检测鉴权失败（使用 auth_failed 标志或消息内容），尝试自动登录刷新 Cookie 后重试一次
-                if auth_failed or any(k in (message or "") for k in ["未配置Cookie", "缺少'token'", "未授权", "Unauthorized", "token", "csrf", "登录已过期", "过期", "expired"]):
-                    try:
-                        logger.info("检测到Cookie或鉴权问题，尝试自动登录刷新Cookie后重试一次")
-                    except Exception:
-                        pass
+                # 检测鉴权失败，尝试自动登录刷新 Cookie 后重试一次
+                if any(k in (message or "") for k in ["未配置Cookie", "缺少'token'", "未授权", "Unauthorized", "token", "csrf", "登录已过期", "过期", "expired"]):
+                    logger.info("检测到Cookie或鉴权问题，尝试自动登录刷新Cookie后重试一次")
                     new_cookie = self._auto_login()
                     if new_cookie:
                         self._cookie = new_cookie
@@ -504,11 +384,8 @@ class HdhiveSign(_PluginBase):
                             "username": getattr(self, "_username", ""),
                             "password": getattr(self, "_password", ""),
                         })
-                        try:
-                            logger.info("自动登录成功，使用新Cookie重试签到")
-                        except Exception:
-                            pass
-                        state2, message2, _ = self._signin_base()
+                        logger.info("自动登录成功，使用新Cookie重试签到")
+                        state2, message2 = self._signin_base()
                         if state2:
                             sign_status = "签到成功" if "签到" in (message2 or "") and "已" not in message2 else "已签到"
                             sign_dict = {
@@ -523,22 +400,17 @@ class HdhiveSign(_PluginBase):
                             self._send_sign_notification(sign_dict)
                             return sign_dict
                 
+                # 暂不保存失败记录，视重试策略决定是否写入
+                
                 # 常规重试逻辑
                 if retry_count < self._max_retries:
-                    try:
-                        logger.info(f"将在{self._retry_interval}秒后进行第{retry_count+1}次常规重试...")
-                    except Exception:
-                        pass
+                    logger.info(f"将在{self._retry_interval}秒后进行第{retry_count+1}次常规重试...")
                     if self._notify:
-                        try:
-                            if NotificationType is not None:
-                                self.post_message(
-                                    mtype=NotificationType.SiteMessage,
-                                    title="【影巢签到重试】",
-                                    text=f"❗ 签到失败: {message}，{self._retry_interval}秒后将进行第{retry_count+1}次常规重试"
-                                )
-                        except Exception:
-                            pass
+                        self.post_message(
+                            mtype=NotificationType.SiteMessage,
+                            title="【影巢签到重试】",
+                            text=f"❗ 签到失败: {message}，{self._retry_interval}秒后将进行第{retry_count+1}次常规重试"
+                        )
                     time.sleep(self._retry_interval)
                     return self.sign(retry_count + 1, extended_retry)
                 
@@ -551,30 +423,20 @@ class HdhiveSign(_PluginBase):
                 self._save_sign_history(sign_dict)
                 
                 if self._notify:
-                    try:
-                        if NotificationType is not None:
-                            self.post_message(
-                                mtype=NotificationType.SiteMessage,
-                                title="【❌ 影巢签到失败】",
-                                text=f"❌ 签到失败: {message}，所有重试均已失败"
-                            )
-                    except Exception:
-                        pass
+                    self.post_message(
+                        mtype=NotificationType.SiteMessage,
+                        title="【❌ 影巢签到失败】",
+                        text=f"❌ 签到失败: {message}，所有重试均已失败"
+                    )
                     notification_sent = True
                 return sign_dict
         
         except requests.RequestException as req_exc:
             # 网络请求异常处理
-            try:
-                logger.error(f"网络请求异常: {str(req_exc)}")
-            except Exception:
-                pass
+            logger.error(f"网络请求异常: {str(req_exc)}")
             # 添加执行超时检查
             if (datetime.now() - start_time).total_seconds() > sign_timeout:
-                try:
-                    logger.error("签到执行时间超过5分钟，执行超时")
-                except Exception:
-                    pass
+                logger.error("签到执行时间超过5分钟，执行超时")
                 sign_dict = {
                     "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
                     "status": "签到失败: 执行超时",
@@ -582,23 +444,16 @@ class HdhiveSign(_PluginBase):
                 self._save_sign_history(sign_dict)
                 
                 if self._notify and not notification_sent:
-                    try:
-                        if NotificationType is not None:
-                            self.post_message(
-                                mtype=NotificationType.SiteMessage,
-                                title="【❌ 影巢签到失败】",
-                                text="❌ 签到执行超时，已强制终止，请检查网络或站点状态"
-                            )
-                    except Exception:
-                        pass
+                    self.post_message(
+                        mtype=NotificationType.SiteMessage,
+                        title="【❌ 影巢签到失败】",
+                        text="❌ 签到执行超时，已强制终止，请检查网络或站点状态"
+                    )
                     notification_sent = True
                 
                 return sign_dict
         except Exception as e:
-            try:
-                logger.error(f"影巢 签到异常: {str(e)}", exc_info=True)
-            except Exception:
-                pass
+            logger.error(f"影巢 签到异常: {str(e)}", exc_info=True)
             sign_dict = {
                 "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
                 "status": f"签到失败: {str(e)}",
@@ -606,20 +461,16 @@ class HdhiveSign(_PluginBase):
             self._save_sign_history(sign_dict)
             
             if self._notify and not notification_sent:
-                try:
-                    if NotificationType is not None:
-                        self.post_message(
-                            mtype=NotificationType.SiteMessage,
-                            title="【❌ 影巢签到失败】",
-                            text=f"❌ 签到异常: {str(e)}"
-                        )
-                except Exception:
-                    pass
+                self.post_message(
+                    mtype=NotificationType.SiteMessage,
+                    title="【❌ 影巢签到失败】",
+                    text=f"❌ 签到异常: {str(e)}"
+                )
                 notification_sent = True
             
             return sign_dict
 
-    def _signin_base(self) -> Tuple[bool, str, bool]:
+    def _signin_base(self) -> Tuple[bool, str]:
         """
         基于影巢API的签到实现
         """
@@ -631,38 +482,26 @@ class HdhiveSign(_PluginBase):
                         name, value = cookie_item.strip().split('=', 1)
                         cookies[name] = value
             else:
-                return False, "未配置Cookie", True
+                return False, "未配置Cookie"
 
             token = cookies.get('token')
             csrf_token = cookies.get('csrf_access_token')
 
             if not token:
-                return False, "Cookie中缺少'token'", True
+                return False, "Cookie中缺少'token'"
 
             user_id = None
             referer = self._site_url
             try:
-                if jwt:
-                    decoded_token = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
-                    user_id = decoded_token.get('sub')
-                    if user_id:
-                        referer = f"{self._base_url}/user/{user_id}"
+                decoded_token = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
+                user_id = decoded_token.get('sub')
+                if user_id:
+                    referer = f"{self._base_url}/user/{user_id}"
             except Exception as e:
-                try:
-                    logger.warning(f"从Token中解析用户ID失败，将使用默认Referer: {e}")
-                except Exception:
-                    pass
+                logger.warning(f"从Token中解析用户ID失败，将使用默认Referer: {e}")
 
-            proxies = None
-            ua = None
-            if settings is not None:
-                try:
-                    proxies = settings.PROXY
-                    ua = settings.USER_AGENT
-                except Exception:
-                    pass
-            if not ua:
-                ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            proxies = settings.PROXY
+            ua = settings.USER_AGENT
 
             headers = {
                 'User-Agent': ua,
@@ -684,16 +523,13 @@ class HdhiveSign(_PluginBase):
             )
 
             if signin_res is None:
-                return False, '签到请求失败，响应为空，请检查代理或网络环境', False
+                return False, '签到请求失败，响应为空，请检查代理或网络环境'
 
             try:
                 signin_result = signin_res.json()
             except json.JSONDecodeError:
-                try:
-                    logger.error(f"API响应JSON解析失败 (状态码 {signin_res.status_code}): {signin_res.text[:500]}")
-                except Exception:
-                    pass
-                return False, f'签到API响应格式错误，状态码: {signin_res.status_code}', False
+                logger.error(f"API响应JSON解析失败 (状态码 {signin_res.status_code}): {signin_res.text[:500]}")
+                return False, f'签到API响应格式错误，状态码: {signin_res.status_code}'
 
             message = signin_result.get('message', '无明确消息')
             
@@ -702,30 +538,21 @@ class HdhiveSign(_PluginBase):
                     self._fetch_user_info(cookies, token)
                 except Exception:
                     pass
-                return True, message, False
+                return True, message
 
             if "已经签到" in message or "签到过" in message:
                 try:
                     self._fetch_user_info(cookies, token)
                 except Exception:
                     pass
-                return True, message, False
+                return True, message 
 
-            try:
-                logger.error(f"签到失败, HTTP状态码: {signin_res.status_code}, 消息: {message}")
-            except Exception:
-                pass
-            # 检测是否为鉴权失败（401/403）
-            if signin_res.status_code in [401, 403]:
-                return False, message, True
-            return False, message, False
+            logger.error(f"签到失败, HTTP状态码: {signin_res.status_code}, 消息: {message}")
+            return False, message
 
         except Exception as e:
-            try:
-                logger.error(f"签到流程发生未知异常", exc_info=True)
-            except Exception:
-                pass
-            return False, f'签到异常: {str(e)}', False
+            logger.error(f"签到流程发生未知异常", exc_info=True)
+            return False, f'签到异常: {str(e)}'
 
     def _save_sign_history(self, sign_data):
         """
@@ -755,50 +582,37 @@ class HdhiveSign(_PluginBase):
                         valid_history.append(record)
                 except (ValueError, KeyError):
                     # 如果记录日期格式不正确，尝试修复
-                    try:
-                        logger.warning(f"历史记录日期格式无效: {record.get('date', '无日期')}")
-                    except Exception:
-                        pass
+                    logger.warning(f"历史记录日期格式无效: {record.get('date', '无日期')}")
                     # 添加新的日期并保留记录
                     record["date"] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
                     valid_history.append(record)
 
             # 保存历史
             self.save_data(key="sign_history", value=valid_history)
-            try:
-                logger.info(f"保存签到历史记录，当前共有 {len(valid_history)} 条记录")
-            except Exception:
-                pass
+            logger.info(f"保存签到历史记录，当前共有 {len(valid_history)} 条记录")
 
         except Exception as e:
-            try:
-                logger.error(f"保存签到历史记录失败: {str(e)}", exc_info=True)
-            except Exception:
-                pass
+            logger.error(f"保存签到历史记录失败: {str(e)}", exc_info=True)
 
     def _fetch_user_info(self, cookies: Dict[str, str], token: str) -> Optional[dict]:
         try:
             referer = self._site_url
             try:
-                decoded_token = jwt.decode(token, options={"verify_signature": False, "verify_exp": False}) if jwt else {}
+                decoded_token = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
                 user_id = decoded_token.get('sub')
                 if user_id:
                     referer = f"{self._base_url}/user/{user_id}"
             except Exception:
                 pass
             headers = {
-                'User-Agent': settings.USER_AGENT if settings and hasattr(settings, 'USER_AGENT') else "Mozilla/5.0",
+                'User-Agent': settings.USER_AGENT,
                 'Accept': 'application/json, text/plain, */*',
                 'Origin': self._base_url,
                 'Referer': referer,
                 'Authorization': f'Bearer {token}',
             }
-            proxies = settings.PROXY if settings and hasattr(settings, 'PROXY') else None
-            resp = requests.get(self._user_info_api, headers=headers, cookies=cookies, proxies=proxies, timeout=30, verify=False)
-            try:
-                logger.info(f"拉取用户信息 API 状态码: {getattr(resp,'status_code','unknown')}")
-            except Exception:
-                pass
+            resp = requests.get(self._user_info_api, headers=headers, cookies=cookies, proxies=settings.PROXY, timeout=30, verify=False)
+            logger.info(f"拉取用户信息 API 状态码: {getattr(resp,'status_code','unknown')} CT: {getattr(resp.headers,'get',lambda k:'' )('Content-Type')}")
             data = {}
             try:
                 data = resp.json()
@@ -821,7 +635,7 @@ class HdhiveSign(_PluginBase):
             if not info.get('nickname') or info.get('points') is None or info.get('signin_days_total') is None:
                 try:
                     rsc_headers = {
-                        'User-Agent': headers.get('User-Agent', 'Mozilla/5.0'),
+                        'User-Agent': settings.USER_AGENT,
                         'Accept': 'text/x-component',
                         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
                         'Origin': self._base_url,
@@ -829,17 +643,15 @@ class HdhiveSign(_PluginBase):
                         'rsc': '1',
                     }
                     rsc_url = referer
-                    rsc_resp = requests.get(rsc_url, headers=rsc_headers, cookies=cookies, proxies=proxies, timeout=30, verify=False)
-                    try:
-                        logger.info(f"RSC 用户页状态码: {getattr(rsc_resp,'status_code','unknown')}")
-                    except Exception:
-                        pass
+                    rsc_resp = requests.get(rsc_url, headers=rsc_headers, cookies=cookies, proxies=settings.PROXY, timeout=30, verify=False)
+                    logger.info(f"RSC 用户页状态码: {getattr(rsc_resp,'status_code','unknown')} CT: {getattr(rsc_resp.headers,'get',lambda k:'' )('Content-Type')}")
                     rsc_text = rsc_resp.text or ''
-                    m_nick = re.search(r'"nickname":"([^"]+)"', rsc_text)
-                    m_points = re.search(r'"points":(\d+)', rsc_text)
-                    m_days = re.search(r'"signin_days_total":(\d+)', rsc_text)
-                    m_avatar = re.search(r'"avatar_url":"([^"]+)"', rsc_text)
-                    m_created = re.search(r'"created_at":"([^"]+)"', rsc_text)
+                    import re as _re
+                    m_nick = _re.search(r'"nickname":"([^"]+)"', rsc_text)
+                    m_points = _re.search(r'"points":(\d+)', rsc_text)
+                    m_days = _re.search(r'"signin_days_total":(\d+)', rsc_text)
+                    m_avatar = _re.search(r'"avatar_url":"([^"]+)"', rsc_text)
+                    m_created = _re.search(r'"created_at":"([^"]+)"', rsc_text)
                     if m_nick:
                         info['nickname'] = m_nick.group(1)
                     if m_points:
@@ -872,10 +684,7 @@ class HdhiveSign(_PluginBase):
             self.save_data('hdhive_user_info', info)
             return info
         except Exception as e:
-            try:
-                logger.warning(f"获取用户信息失败: {e}")
-            except Exception:
-                pass
+            logger.warning(f"获取用户信息失败: {e}")
             return None
 
     def _extract_rsc_object(self, text: str, key: str) -> Optional[str]:
@@ -1031,66 +840,33 @@ class HdhiveSign(_PluginBase):
             )
 
         # 发送通知
-        try:
-            if NotificationType is not None:
-                self.post_message(
-                    mtype=NotificationType.SiteMessage,
-                    title=title,
-                    text=text
-                )
-        except Exception:
-            pass
+        self.post_message(
+            mtype=NotificationType.SiteMessage,
+            title=title,
+            text=text
+        )
 
     def get_state(self) -> bool:
-        try:
-            try:
-                logger.info(f"hdhivesign get_state 被调用, enabled={self._enabled}")
-            except Exception:
-                pass
-            return self._enabled
-        except Exception as e:
-            try:
-                logger.error(f"get_state 异常: {e}", exc_info=True)
-            except Exception:
-                pass
-            return False
+        logger.info(f"hdhivesign状态: {self._enabled}")
+        return self._enabled
 
     def get_service(self) -> List[Dict[str, Any]]:
-        try:
-            try:
-                logger.info(f"hdhivesign get_service 被调用, enabled={self._enabled}, cron={self._cron}")
-            except Exception:
-                pass
-            if self._enabled and self._cron and CronTrigger is not None:
-                try:
-                    logger.info(f"注册定时服务: {self._cron}")
-                except Exception:
-                    pass
-                return [{
-                    "id": "hdhivesign",
-                    "name": "影巢签到",
-                    "trigger": CronTrigger.from_crontab(self._cron),
-                    "func": self.sign,
-                    "kwargs": {}
-                }]
-            return []
-        except Exception as e:
-            try:
-                logger.error(f"get_service 异常: {e}", exc_info=True)
-            except Exception:
-                pass
-            return []
+        if self._enabled and self._cron:
+            logger.info(f"注册定时服务: {self._cron}")
+            return [{
+                "id": "hdhivesign",
+                "name": "影巢签到",
+                "trigger": CronTrigger.from_crontab(self._cron),
+                "func": self.sign,
+                "kwargs": {}
+            }]
+        return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """
         返回插件配置的表单
         """
-        try:
-            try:
-                logger.info("hdhivesign get_form 被调用")
-            except Exception:
-                pass
-            return [
+        return [
             {
                 'component': 'VForm',
                 'content': [
@@ -1318,7 +1094,7 @@ class HdhiveSign(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '【使用教程】\n1. 登录影巢站点（具体域名请在上方"站点地址"中填写），按F12打开开发者工具。\n2. 切换到"应用(Application)" -> "Cookie"，或"网络(Network)"选项卡，找到发往API的请求。\n3. 复制完整的Cookie字符串。\n4. 确保Cookie中包含 `token` 和 `csrf_access_token` 字段。\n5. 粘贴到上方输入框，启用插件并保存。\n\n⚠️ 影巢可能变更域名，若签到异常请先更新"站点地址"。插件会自动使用系统配置的代理。'
+                                            'text': '【使用教程】\n1. 登录影巢站点（具体域名请在上方“站点地址”中填写），按F12打开开发者工具。\n2. 切换到"应用(Application)" -> "Cookie"，或"网络(Network)"选项卡，找到发往API的请求。\n3. 复制完整的Cookie字符串。\n4. 确保Cookie中包含 `token` 和 `csrf_access_token` 字段。\n5. 粘贴到上方输入框，启用插件并保存。\n\n⚠️ 影巢可能变更域名，若签到异常请先更新“站点地址”。插件会自动使用系统配置的代理。'
                                         }
                                     }
                                 ]
@@ -1340,142 +1116,129 @@ class HdhiveSign(_PluginBase):
             "username": "",
             "password": ""
         }
-        except Exception as e:
-            try:
-                logger.error(f"get_form 异常: {e}", exc_info=True)
-            except Exception:
-                pass
-            return [], {}
 
     def get_page(self) -> List[dict]:
         """
         构建插件详情页面，展示签到历史 (完全参照 qmjsign)
         """
-        try:
-            historys = self.get_data('sign_history') or []
-            user = self.get_data('hdhive_user_info') or {}
-            consecutive_days = self.get_data('consecutive_days') or 0
+        historys = self.get_data('sign_history') or []
+        user = self.get_data('hdhive_user_info') or {}
+        consecutive_days = self.get_data('consecutive_days') or 0
 
-            info_card = []
-            if user:
-                avatar = user.get('avatar_url') or ''
-                nickname = user.get('nickname') or '—'
-                points = user.get('points') if user.get('points') is not None else '—'
-                signin_days_total = user.get('signin_days_total') if user.get('signin_days_total') is not None else '—'
-                created_at = user.get('created_at') or '—'
-                info_card = [{
-                    'component': 'VCard',
-                    'props': {'variant': 'outlined', 'class': 'mb-4'},
-                    'content': [
-                        {
-                            'component': 'VCardTitle',
-                            'props': {'class': 'd-flex align-center justify-space-between'},
-                            'content': [
-                                {
-                                    'component': 'div',
-                                    'content': [
-                                        {'component': 'span', 'props': {'class': 'text-h6'}, 'text': '👤 影巢用户信息'},
-                                        {'component': 'div', 'props': {'class': 'text-caption'}, 'text': f'加入时间：{created_at}'}
-                                    ]
-                                },
-                                {'component': 'VAvatar', 'props': {'size': 64}, 'content': [{'component': 'img', 'props': {'src': avatar, 'alt': nickname}}]}
-                            ]
-                        },
-                        {'component': 'VDivider'},
-                        {
-                            'component': 'VCardText',
-                            'content': [
-                                {
-                                    'component': 'VRow',
-                                    'content': [
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VChip', 'props': {'variant': 'elevated', 'color': 'primary', 'class': 'mb-2'}, 'text': f'用户：{nickname}'}]},
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VChip', 'props': {'variant': 'elevated', 'color': 'amber-darken-2', 'class': 'mb-2'}, 'text': f'积分：{points}'}]},
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VChip', 'props': {'variant': 'elevated', 'color': 'success', 'class': 'mb-2'}, 'text': f'累计签到天数（站点）：{signin_days_total}'}]},
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VChip', 'props': {'variant': 'elevated', 'color': 'cyan-darken-2', 'class': 'mb-2'}, 'text': f'连续签到天数（插件）：{consecutive_days}'}]},
-                                    ]
-                                },
-                                {'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'class': 'mt-2', 'text': '注：累计签到天数来自站点数据；插件统计的是连续天数，两者可能不同'}},
-                            ]
-                        }
-                    ]
-                }]
-
-            if not historys:
-                return info_card + [{
-                    'component': 'VAlert',
-                    'props': {
-                        'type': 'info', 'variant': 'tonal',
-                        'text': '暂无签到记录，请等待下一次自动签到或手动触发一次。',
-                        'class': 'mb-2'
-                    }
-                }]
-
-            historys = sorted(historys, key=lambda x: x.get("date", ""), reverse=True)
-
-            history_rows = []
-            for history in historys:
-                status = history.get("status", "未知")
-                if "成功" in status or "已签到" in status:
-                    status_color = "success"
-                elif "失败" in status:
-                    status_color = "error"
-                else:
-                    status_color = "info"
-
-                history_rows.append({
-                    'component': 'tr',
-                    'content': [
-                        {'component': 'td', 'props': {'class': 'text-caption'}, 'text': history.get("date", "")},
-                        {
-                            'component': 'td',
-                            'content': [{
-                                'component': 'VChip',
-                                'props': {'color': status_color, 'size': 'small', 'variant': 'outlined'},
-                                'text': status
-                            }]
-                        },
-                        {'component': 'td', 'text': history.get('message', '—')},
-                        {'component': 'td', 'text': str(history.get('points', '—'))},
-                        {'component': 'td', 'text': str(history.get('days', '—'))},
-                    ]
-                })
-
-            return info_card + [{
+        info_card = []
+        if user:
+            avatar = user.get('avatar_url') or ''
+            nickname = user.get('nickname') or '—'
+            points = user.get('points') if user.get('points') is not None else '—'
+            signin_days_total = user.get('signin_days_total') if user.get('signin_days_total') is not None else '—'
+            created_at = user.get('created_at') or '—'
+            info_card = [{
                 'component': 'VCard',
                 'props': {'variant': 'outlined', 'class': 'mb-4'},
                 'content': [
-                    {'component': 'VCardTitle', 'props': {'class': 'text-h6'}, 'text': '📊 影巢签到历史'},
+                    {
+                        'component': 'VCardTitle',
+                        'props': {'class': 'd-flex align-center justify-space-between'},
+                        'content': [
+                            {
+                                'component': 'div',
+                                'content': [
+                                    {'component': 'span', 'props': {'class': 'text-h6'}, 'text': '👤 影巢用户信息'},
+                                    {'component': 'div', 'props': {'class': 'text-caption'}, 'text': f'加入时间：{created_at}'}
+                                ]
+                            },
+                            {'component': 'VAvatar', 'props': {'size': 64}, 'content': [{'component': 'img', 'props': {'src': avatar, 'alt': nickname}}]}
+                        ]
+                    },
+                    {'component': 'VDivider'},
                     {
                         'component': 'VCardText',
-                        'content': [{
-                            'component': 'VTable',
-                            'props': {'hover': True, 'density': 'compact'},
-                            'content': [
-                                {
-                                    'component': 'thead',
-                                    'content': [{
-                                        'component': 'tr',
-                                        'content': [
-                                            {'component': 'th', 'text': '时间'},
-                                            {'component': 'th', 'text': '状态'},
-                                            {'component': 'th', 'text': '详情'},
-                                            {'component': 'th', 'text': '奖励积分'},
-                                            {'component': 'th', 'text': '连续天数'}
-                                        ]
-                                    }]
-                                },
-                                {'component': 'tbody', 'content': history_rows}
-                            ]
-                        }]
+                        'content': [
+                            {
+                                'component': 'VRow',
+                                'content': [
+                                    {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VChip', 'props': {'variant': 'elevated', 'color': 'primary', 'class': 'mb-2'}, 'text': f'用户：{nickname}'}]},
+                                    {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VChip', 'props': {'variant': 'elevated', 'color': 'amber-darken-2', 'class': 'mb-2'}, 'text': f'积分：{points}'}]},
+                                    {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VChip', 'props': {'variant': 'elevated', 'color': 'success', 'class': 'mb-2'}, 'text': f'累计签到天数（站点）：{signin_days_total}'}]},
+                                    {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VChip', 'props': {'variant': 'elevated', 'color': 'cyan-darken-2', 'class': 'mb-2'}, 'text': f'连续签到天数（插件）：{consecutive_days}'}]},
+                                ]
+                            },
+                            {'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'class': 'mt-2', 'text': '注：累计签到天数来自站点数据；插件统计的是连续天数，两者可能不同'}},
+                        ]
                     }
                 ]
             }]
-        except Exception as e:
-            try:
-                logger.error(f"get_page 异常: {e}", exc_info=True)
-            except Exception:
-                pass
-            return []
+
+        if not historys:
+            return info_card + [{
+                'component': 'VAlert',
+                'props': {
+                    'type': 'info', 'variant': 'tonal',
+                    'text': '暂无签到记录，请等待下一次自动签到或手动触发一次。',
+                    'class': 'mb-2'
+                }
+            }]
+
+        historys = sorted(historys, key=lambda x: x.get("date", ""), reverse=True)
+
+        history_rows = []
+        for history in historys:
+            status = history.get("status", "未知")
+            if "成功" in status or "已签到" in status:
+                status_color = "success"
+            elif "失败" in status:
+                status_color = "error"
+            else:
+                status_color = "info"
+
+            history_rows.append({
+                'component': 'tr',
+                'content': [
+                    {'component': 'td', 'props': {'class': 'text-caption'}, 'text': history.get("date", "")},
+                    {
+                        'component': 'td',
+                        'content': [{
+                            'component': 'VChip',
+                            'props': {'color': status_color, 'size': 'small', 'variant': 'outlined'},
+                            'text': status
+                        }]
+                    },
+                    {'component': 'td', 'text': history.get('message', '—')},
+                    {'component': 'td', 'text': str(history.get('points', '—'))},
+                    {'component': 'td', 'text': str(history.get('days', '—'))},
+                ]
+            })
+
+        return info_card + [{
+            'component': 'VCard',
+            'props': {'variant': 'outlined', 'class': 'mb-4'},
+            'content': [
+                {'component': 'VCardTitle', 'props': {'class': 'text-h6'}, 'text': '📊 影巢签到历史'},
+                {
+                    'component': 'VCardText',
+                    'content': [{
+                        'component': 'VTable',
+                        'props': {'hover': True, 'density': 'compact'},
+                        'content': [
+                            {
+                                'component': 'thead',
+                                'content': [{
+                                    'component': 'tr',
+                                    'content': [
+                                        {'component': 'th', 'text': '时间'},
+                                        {'component': 'th', 'text': '状态'},
+                                        {'component': 'th', 'text': '详情'},
+                                        {'component': 'th', 'text': '奖励积分'},
+                                        {'component': 'th', 'text': '连续天数'}
+                                    ]
+                                }]
+                            },
+                            {'component': 'tbody', 'content': history_rows}
+                        ]
+                    }]
+                }
+            ]
+        }]
 
     def get_api(self) -> List[Dict[str, Any]]:
         return []
@@ -1491,10 +1254,7 @@ class HdhiveSign(_PluginBase):
                     self._scheduler.shutdown()
                 self._scheduler = None
         except Exception as e:
-            try:
-                logger.error(f"停止影巢签到服务失败: {str(e)}")
-            except Exception:
-                pass
+            logger.error(f"停止影巢签到服务失败: {str(e)}")
 
     def _is_manual_trigger(self) -> bool:
         """
@@ -1512,15 +1272,9 @@ class HdhiveSign(_PluginBase):
                 for job in jobs:
                     if "延长重试" in job.name:
                         self._scheduler.remove_job(job.id)
-                        try:
-                            logger.info(f"清理延长重试任务: {job.name}")
-                        except Exception:
-                            pass
+                        logger.info(f"清理延长重试任务: {job.name}")
         except Exception as e:
-            try:
-                logger.warning(f"清理延长重试任务失败: {str(e)}")
-            except Exception:
-                pass
+            logger.warning(f"清理延长重试任务失败: {str(e)}")
 
     def _has_running_extended_retry(self) -> bool:
         """
@@ -1564,12 +1318,13 @@ class HdhiveSign(_PluginBase):
             if not token:
                 return None
             try:
-                decoded = jwt.decode(token, options={"verify_signature": False, "verify_exp": False}) if jwt else {}
+                decoded = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
                 exp_ts = decoded.get('exp')
             except Exception:
                 exp_ts = None
             if exp_ts and isinstance(exp_ts, (int, float)):
-                now_ts = int(time.time())
+                import time as _t
+                now_ts = int(_t.time())
                 if exp_ts <= now_ts:
                     return self._auto_login()
             return None
@@ -1579,49 +1334,29 @@ class HdhiveSign(_PluginBase):
     def _auto_login(self) -> Optional[str]:
         try:
             if not getattr(self, "_username", None) or not getattr(self, "_password", None):
-                try:
-                    logger.warning("未配置用户名或密码，无法自动登录")
-                except Exception:
-                    pass
+                logger.warning("未配置用户名或密码，无法自动登录")
                 return None
             try:
                 import cloudscraper
                 scraper = cloudscraper.create_scraper()
-                try:
-                    logger.info("自动登录: 使用 cloudscraper")
-                except Exception:
-                    pass
+                logger.info("自动登录: 使用 cloudscraper")
             except Exception as e:
-                try:
-                    logger.warning(f"cloudscraper 不可用，将尝试 requests：{e}")
-                except Exception:
-                    pass
+                logger.warning(f"cloudscraper 不可用，将尝试 requests：{e}")
                 scraper = requests
-                try:
-                    logger.info("自动登录: 回退到 requests")
-                except Exception:
-                    pass
+                logger.info("自动登录: 回退到 requests")
             # 预热登录页，拿到初始 Cookie
             login_url = f"{self._base_url}{self._login_page}"
-            resp_warm = None
             try:
-                try:
-                    logger.info(f"自动登录: 预热 {login_url}")
-                except Exception:
-                    pass
-                proxies = settings.PROXY if settings and hasattr(settings, 'PROXY') else None
-                resp_warm = scraper.get(login_url, timeout=30, proxies=proxies)
-                try:
-                    logger.info(f"自动登录: 预热状态码 {getattr(resp_warm, 'status_code', 'unknown')}")
-                except Exception:
-                    pass
+                logger.info(f"自动登录: 预热 {login_url}")
+                resp_warm = scraper.get(login_url, timeout=30, proxies=settings.PROXY)
+                logger.info(f"自动登录: 预热状态码 {getattr(resp_warm, 'status_code', 'unknown')} Content-Type {getattr(resp_warm.headers, 'get', lambda k: '')('Content-Type')}")
             except Exception:
                 pass
             # 尝试 API 登录候选
             for path in self._login_api_candidates:
                 url = f"{self._base_url}{path}"
                 headers = {
-                    'User-Agent': settings.USER_AGENT if settings and hasattr(settings, 'USER_AGENT') else "Mozilla/5.0",
+                    'User-Agent': settings.USER_AGENT,
                     'Accept': 'application/json, text/plain, */*',
                     'Origin': self._base_url,
                     'Referer': login_url,
@@ -1632,20 +1367,13 @@ class HdhiveSign(_PluginBase):
                     'password': getattr(self, "_password", "")
                 }
                 try:
-                    try:
-                        logger.info(f"自动登录: 尝试 API 登录 {url}")
-                    except Exception:
-                        pass
-                    proxies = settings.PROXY if settings and hasattr(settings, 'PROXY') else None
-                    resp = scraper.post(url, headers=headers, json=payload, timeout=30, proxies=proxies)
-                    try:
-                        logger.info(f"自动登录: API 登录状态码 {getattr(resp, 'status_code', 'unknown')}")
-                    except Exception:
-                        pass
+                    logger.info(f"自动登录: 尝试 API 登录 {url}")
+                    resp = scraper.post(url, headers=headers, json=payload, timeout=30, proxies=settings.PROXY)
+                    logger.info(f"自动登录: API 登录状态码 {getattr(resp, 'status_code', 'unknown')} Content-Type {getattr(resp.headers, 'get', lambda k: '')('Content-Type')}")
                     # 成功条件：响应包含 set-cookie 或 JSON 内含 meta.access_token
                     cookies_dict = None
                     try:
-                        cookies_dict = getattr(resp, "cookies", None).get_dict() if getattr(resp, "cookies", None) else {}
+                        cookies_dict = getattr(resp, 'cookies', None).get_dict() if getattr(resp, 'cookies', None) else {}
                     except Exception:
                         cookies_dict = {}
                     token_cookie = cookies_dict.get('token')
@@ -1653,10 +1381,7 @@ class HdhiveSign(_PluginBase):
                     if not token_cookie:
                         try:
                             data = resp.json()
-                            try:
-                                logger.info(f"自动登录: API 登录返回JSON keys {list(data.keys()) if isinstance(data, dict) else 'non-dict'}")
-                            except Exception:
-                                pass
+                            logger.info(f"自动登录: API 登录返回JSON keys {list(data.keys()) if isinstance(data, dict) else 'non-dict'}")
                             meta = (data.get('meta') or {})
                             acc = meta.get('access_token')
                             ref = meta.get('refresh_token')
@@ -1677,20 +1402,14 @@ class HdhiveSign(_PluginBase):
                         if csrf_cookie:
                             cookie_items.append(f"csrf_access_token={csrf_cookie}")
                         cookie_str = "; ".join(cookie_items)
-                        try:
-                            logger.info("API登录成功，已生成Cookie")
-                        except Exception:
-                            pass
+                        logger.info("API登录成功，已生成Cookie")
                         return cookie_str
                 except Exception as e:
-                    try:
-                        logger.debug(f"API登录候选失败: {path} -> {e}")
-                    except Exception:
-                        pass
+                    logger.debug(f"API登录候选失败: {path} -> {e}")
             # 尝试 Next.js Server Action 登录
             url = f"{self._base_url}{self._login_page}"
             headers = {
-                'User-Agent': settings.USER_AGENT if settings and hasattr(settings, 'USER_AGENT') else "Mozilla/5.0",
+                'User-Agent': settings.USER_AGENT,
                 'Accept': 'text/x-component',
                 'Origin': self._base_url,
                 'Referer': login_url,
@@ -1701,43 +1420,28 @@ class HdhiveSign(_PluginBase):
             try:
                 warm_text = getattr(resp_warm, 'text', '') or ''
                 # 常见形式：next-action":"<token>" 或 name="next-action" value="<token>"
-                m = re.search(r'next-action"\s*:\s*"([a-fA-F0-9]{16,64})"', warm_text)
+                import re as _re
+                m = _re.search(r'next-action"\s*:\s*"([a-fA-F0-9]{16,64})"', warm_text)
                 if not m:
-                    m = re.search(r'name="next-action"\s+value="([a-fA-F0-9]{16,64})"', warm_text)
+                    m = _re.search(r'name="next-action"\s+value="([a-fA-F0-9]{16,64})"', warm_text)
                 if m:
                     next_action_token = m.group(1)
                     headers['next-action'] = next_action_token
                     # 参考样例的最小 router state（静态值）
                     headers['next-router-state-tree'] = '%5B%22%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22login%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2Flogin%22%2C%22refresh%22%5D%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D%7D%2Cnull%2Cnull%2Ctrue%5D'
-                    try:
-                        logger.info(f"自动登录: 提取 next-action={next_action_token}")
-                    except Exception:
-                        pass
+                    logger.info(f"自动登录: 提取 next-action={next_action_token}")
                 else:
-                    try:
-                        logger.info("自动登录: 未在页面提取到 next-action token")
-                    except Exception:
-                        pass
+                    logger.info("自动登录: 未在页面提取到 next-action token")
             except Exception as e:
-                try:
-                    logger.debug(f"自动登录: 提取 next-action 失败: {e}")
-                except Exception:
-                    pass
+                logger.debug(f"自动登录: 提取 next-action 失败: {e}")
             body = json.dumps([{'username': getattr(self, "_username", ""), 'password': getattr(self, "_password", "")}])
             try:
-                try:
-                    logger.info(f"自动登录: 尝试 Server Action 登录 {url}")
-                except Exception:
-                    pass
-                proxies = settings.PROXY if settings and hasattr(settings, 'PROXY') else None
-                resp = scraper.post(url, headers=headers, data=body, timeout=30, proxies=proxies)
-                try:
-                    logger.info(f"自动登录: SA 登录状态码 {getattr(resp, 'status_code', 'unknown')}")
-                except Exception:
-                    pass
+                logger.info(f"自动登录: 尝试 Server Action 登录 {url}")
+                resp = scraper.post(url, headers=headers, data=body, timeout=30, proxies=settings.PROXY)
+                logger.info(f"自动登录: SA 登录状态码 {getattr(resp, 'status_code', 'unknown')} Content-Type {getattr(resp.headers, 'get', lambda k: '')('Content-Type')}")
                 cookies_dict = None
                 try:
-                    cookies_dict = getattr(resp, "cookies", None).get_dict() if getattr(resp, "cookies", None) else {}
+                    cookies_dict = getattr(resp, 'cookies', None).get_dict() if getattr(resp, 'cookies', None) else {}
                 except Exception:
                     cookies_dict = {}
                 token_cookie = cookies_dict.get('token')
@@ -1747,30 +1451,20 @@ class HdhiveSign(_PluginBase):
                     if csrf_cookie:
                         cookie_items.append(f"csrf_access_token={csrf_cookie}")
                     cookie_str = "; ".join(cookie_items)
-                    try:
-                        logger.info("Server Action 登录成功，已生成Cookie")
-                    except Exception:
-                        pass
+                    logger.info("Server Action 登录成功，已生成Cookie")
                     return cookie_str
             except Exception as e:
-                try:
-                    logger.warning(f"Server Action 登录失败: {e}")
-                except Exception:
-                    pass
+                logger.warning(f"Server Action 登录失败: {e}")
             # 浏览器自动化兜底：使用 Playwright 直接执行页面登录并读取 Cookie
             try:
                 from playwright.sync_api import sync_playwright
-                try:
-                    logger.info("自动登录: 尝试使用 Playwright 浏览器自动化")
-                except Exception:
-                    pass
+                logger.info("自动登录: 尝试使用 Playwright 浏览器自动化")
                 proxy = None
                 try:
-                    if settings and hasattr(settings, 'PROXY'):
-                        pxy = settings.PROXY or {}
-                        server = pxy.get('http') or pxy.get('https')
-                        if server:
-                            proxy = {"server": server}
+                    pxy = settings.PROXY or {}
+                    server = pxy.get('http') or pxy.get('https')
+                    if server:
+                        proxy = {"server": server}
                 except Exception:
                     proxy = None
                 with sync_playwright() as pw:
@@ -1836,31 +1530,16 @@ class HdhiveSign(_PluginBase):
                         if csrf_cookie:
                             cookie_items.append(f"csrf_access_token={csrf_cookie}")
                         cookie_str = "; ".join(cookie_items)
-                        try:
-                            logger.info("Playwright 登录成功，已生成Cookie")
-                        except Exception:
-                            pass
+                        logger.info("Playwright 登录成功，已生成Cookie")
                         return cookie_str
-                try:
-                    logger.error("自动登录失败，未获取到有效Cookie")
-                except Exception:
-                    pass
+                logger.error("自动登录失败，未获取到有效Cookie")
                 return None
             except Exception as e:
-                try:
-                    logger.error(f"Playwright 自动登录异常: {e}")
-                except Exception:
-                    pass
-                try:
-                    logger.error("自动登录失败，未获取到有效Cookie")
-                except Exception:
-                    pass
+                logger.error(f"Playwright 自动登录异常: {e}")
+                logger.error("自动登录失败，未获取到有效Cookie")
                 return None
         except Exception as e:
-            try:
-                logger.error(f"自动登录异常: {str(e)}")
-            except Exception:
-                pass
+            logger.error(f"自动登录异常: {str(e)}")
             return None
 
     def _get_last_sign_time(self) -> str:
