@@ -1,6 +1,6 @@
 """
 影巢签到插件
-版本: 2.3.0
+版本: 2.3.1
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,12 +10,17 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.3.1: 补充版本历史记录完整性（补全v1.5.0/v1.6.0/v2.1.1/v2.2.2缺失条目）+版本号递增确保插件市场可识别更新
 - v2.3.0: 新增Open API用户信息获取（多路径探测）+头像显示优化（无效URL自动降级为字母占位符）
+- v2.2.2: 修复签到重复执行检测+延长重试任务冲突+通知模板美化（用户信息卡片集成）
 - v2.2.1: 修复cloudscraper未安装时import直接崩溃导致自动登录完全失败（安全导入+requests回退）
 - v2.2.0: 修复代理保存丢失+Cookie提前刷新+登录流程优化(303处理+CF检测)
+- v2.1.1: 修复API description字段检查+JWT user_id解析
 - v2.1.0: 修复：1)用户名/密码保存后重新进入设置不再丢失 2)已签到场景正确识别（手动签过后不再重复重试3次） 3)API返回"已经签到"时标记为成功而非失败
 - v2.0.0: 重大更新：1)添加独立代理配置（支持HTTP/SOCKS5/系统代理/直连） 2)重写自动登录逻辑：使用actionId服务+Server Action方式 3)所有网络请求统一走插件代理配置
 - v1.6.1: 修复插件目录名与ID不匹配导致的404安装失败
+- v1.6.0: 更改插件ID为 HdhiveSignKB，与原版完全独立
+- v1.5.0: 迁移至 kingbb2001 仓库，更改为独立插件
 - v1.4.0: 修复插件市场注册问题（添加根目录 package.json）
 - v1.3.0: 用户信息卡片美化；通知追加用户摘要；重复签到与执行前预拉取用户信息；RSC解析兜底
 - v1.2.0: 自动登录刷新Cookie：cloudscraper与Playwright兜底；修复重复失败记录；默认域名更新为 hdhive.com
@@ -52,7 +57,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.3.0"
+    plugin_version = "2.3.1"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -163,7 +168,7 @@ class HdhiveSignKB(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign v2.3.0 初始化 =============")
+        logger.info("============= hdhivesign v2.3.1 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
