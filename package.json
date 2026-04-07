@@ -7,7 +7,7 @@
     "icon": "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico",
     "author": "kingbb2001",
     "level": 2,
-    "v2": true,
+    "v2": "true",
     "history": {
       "v1.0.0": "基于 madrays 版本修复 Cookie 失效自动登录问题"
     }
