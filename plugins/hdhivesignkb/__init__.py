@@ -1,6 +1,6 @@
 """
 影巢签到插件
-版本: 1.6.0
+版本: 1.6.1
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,7 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
-- v1.6.0: 更改插件ID为 HdhiveSignKB，与原版完全独立
+- v1.6.1: 修复插件目录名与ID不匹配导致的404安装失败
 - v1.4.0: 修复插件市场注册问题（添加根目录 package.json）
 - v1.3.0: 用户信息卡片美化；通知追加用户摘要；重复签到与执行前预拉取用户信息；RSC解析兜底
 - v1.2.0: 自动登录刷新Cookie：cloudscraper与Playwright兜底；修复重复失败记录；默认域名更新为 hdhive.com
@@ -47,7 +47,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "1.6.0"
+    plugin_version = "1.6.1"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
