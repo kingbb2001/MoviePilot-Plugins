@@ -1,7 +1,7 @@
 """
 影巢签到插件
-版本: 1.3.0
-作者: madrays
+版本: 1.0.0
+作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
 - 支持签到失败重试
@@ -10,7 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
-- v1.1.0: 域名改为可配置，统一API拼接(Referer/Origin/接口)，精简日志
+- v1.0.0: 基于 madrays 版本修复 Cookie 失效自动登录问题
 - v1.0.0: 初始版本，基于影巢网站结构实现自动签到
 """
 import time
@@ -41,13 +41,13 @@ class HdhiveSign(_PluginBase):
     # 插件描述
     plugin_desc = "自动完成影巢(HDHive)每日签到，支持失败重试和历史记录"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
+    plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "1.3.0"
+    plugin_version = "1.0.0"
     # 插件作者
-    plugin_author = "madrays"
+    plugin_author = "kingbb2001"
     # 作者主页
-    author_url = "https://github.com/madrays"
+    author_url = "https://github.com/kingbb2001"
     # 插件配置项ID前缀
     plugin_config_prefix = "hdhivesign_"
     # 加载顺序
