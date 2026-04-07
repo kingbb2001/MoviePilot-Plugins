@@ -1,6 +1,6 @@
 """
 影巢签到自用版插件
-版本: 1.0.0
+版本: 1.0.1
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v1.0.1: 修复插件安装后不显示的问题，优化依赖和导入
 - v1.0.0: 基于 madrays 版本修复 Cookie 失效自动登录问题
 - v1.0.0: 初始版本，基于影巢网站结构实现自动签到
 """
@@ -19,8 +20,15 @@ import re
 import json
 from datetime import datetime, timedelta
 
-import jwt
-import pytz
+# 延迟导入，避免加载时崩溃
+try:
+    import jwt
+except ImportError:
+    jwt = None
+try:
+    import pytz
+except ImportError:
+    pytz = None
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -113,7 +121,7 @@ class HdhiveSign(_PluginBase):
                 self._scheduler = BackgroundScheduler(timezone=settings.TZ)
                 self._manual_trigger = True
                 self._scheduler.add_job(func=self.sign, trigger='date',
-                                    run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
+                                    run_date=datetime.now(tz=pytz.timezone(settings.TZ) if pytz else None) + timedelta(seconds=3),
                                     name="影巢签到")
                 self._onlyonce = False
                 self.update_config({
@@ -493,10 +501,11 @@ class HdhiveSign(_PluginBase):
             user_id = None
             referer = self._site_url
             try:
-                decoded_token = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
-                user_id = decoded_token.get('sub')
-                if user_id:
-                    referer = f"{self._base_url}/user/{user_id}"
+                if jwt:
+                    decoded_token = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
+                    user_id = decoded_token.get('sub')
+                    if user_id:
+                        referer = f"{self._base_url}/user/{user_id}"
             except Exception as e:
                 logger.warning(f"从Token中解析用户ID失败，将使用默认Referer: {e}")
 
@@ -601,7 +610,7 @@ class HdhiveSign(_PluginBase):
         try:
             referer = self._site_url
             try:
-                decoded_token = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
+                decoded_token = jwt.decode(token, options={"verify_signature": False, "verify_exp": False}) if jwt else {}
                 user_id = decoded_token.get('sub')
                 if user_id:
                     referer = f"{self._base_url}/user/{user_id}"
@@ -1321,7 +1330,7 @@ class HdhiveSign(_PluginBase):
             if not token:
                 return None
             try:
-                decoded = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
+                decoded = jwt.decode(token, options={"verify_signature": False, "verify_exp": False}) if jwt else {}
                 exp_ts = decoded.get('exp')
             except Exception:
                 exp_ts = None
