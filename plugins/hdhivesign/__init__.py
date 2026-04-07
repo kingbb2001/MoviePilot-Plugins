@@ -1,5 +1,5 @@
 """
-影巢签到插件
+影巢签到自用版插件
 版本: 1.0.0
 作者: kingbb2001
 功能:
@@ -37,7 +37,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class HdhiveSign(_PluginBase):
     # 插件名称
-    plugin_name = "影巢签到"
+    plugin_name = "影巢签到自用版"
     # 插件描述
     plugin_desc = "自动完成影巢(HDHive)每日签到，支持失败重试和历史记录"
     # 插件图标
@@ -103,7 +103,7 @@ class HdhiveSign(_PluginBase):
                 self._history_days = int(config.get("history_days", 30))
                 self._username = (config.get("username") or "").strip()
                 self._password = (config.get("password") or "").strip()
-                logger.info(f"影巢签到插件已加载，配置：enabled={self._enabled}, notify={self._notify}, cron={self._cron}")
+                logger.info(f"影巢签到自用版插件已加载，配置：enabled={self._enabled}, notify={self._notify}, cron={self._cron}")
             
             # 清理所有可能的延长重试任务
             self._clear_extended_retry_tasks()
