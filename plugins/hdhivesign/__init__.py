@@ -1,6 +1,6 @@
 """
 影巢签到自用版插件
-版本: 1.3.0
+版本: 1.4.0
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v1.4.0: 彻底修复插件崩溃问题，添加完整异常保护和属性初始化
 - v1.3.0: 移除package.v2.json避免404错误
 - v1.2.0: 添加package.v2.json和诊断日志
 - v1.1.0: 修复插件安装后不显示的问题，添加加载日志和import保护
@@ -53,7 +54,7 @@ class HdhiveSign(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -75,6 +76,9 @@ class HdhiveSign(_PluginBase):
     _retry_interval = 30  # 重试间隔(秒)
     _history_days = 30  # 历史保留天数
     _manual_trigger = False
+    # 用户名密码（用于自动登录）
+    _username = ""
+    _password = ""
     # 定时器
     _scheduler: Optional[BackgroundScheduler] = None
     _current_trigger_type = None  # 保存当前执行的触发类型
@@ -91,7 +95,7 @@ class HdhiveSign(_PluginBase):
     _login_page = "/login"
 
     def init_plugin(self, config: dict = None):
-        logger.info("============= 影巢签到自用版 v1.3.0 正在加载 =============")
+        logger.info("============= 影巢签到自用版 v1.4.0 正在加载 =============")
         # 停止现有任务
         self.stop_service()
 
@@ -864,28 +868,37 @@ class HdhiveSign(_PluginBase):
         )
 
     def get_state(self) -> bool:
-        logger.info(f"hdhivesign get_state 被调用, enabled={self._enabled}")
-        return self._enabled
+        try:
+            logger.info(f"hdhivesign get_state 被调用, enabled={self._enabled}")
+            return self._enabled
+        except Exception as e:
+            logger.error(f"get_state 异常: {e}", exc_info=True)
+            return False
 
     def get_service(self) -> List[Dict[str, Any]]:
-        logger.info(f"hdhivesign get_service 被调用, enabled={self._enabled}, cron={self._cron}")
-        if self._enabled and self._cron:
-            logger.info(f"注册定时服务: {self._cron}")
-            return [{
-                "id": "hdhivesign",
-                "name": "影巢签到",
-                "trigger": CronTrigger.from_crontab(self._cron),
-                "func": self.sign,
-                "kwargs": {}
-            }]
-        return []
+        try:
+            logger.info(f"hdhivesign get_service 被调用, enabled={self._enabled}, cron={self._cron}")
+            if self._enabled and self._cron:
+                logger.info(f"注册定时服务: {self._cron}")
+                return [{
+                    "id": "hdhivesign",
+                    "name": "影巢签到",
+                    "trigger": CronTrigger.from_crontab(self._cron),
+                    "func": self.sign,
+                    "kwargs": {}
+                }]
+            return []
+        except Exception as e:
+            logger.error(f"get_service 异常: {e}", exc_info=True)
+            return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """
         返回插件配置的表单
         """
-        logger.info("hdhivesign get_form 被调用")
-        return [
+        try:
+            logger.info("hdhivesign get_form 被调用")
+            return [
             {
                 'component': 'VForm',
                 'content': [
@@ -1135,11 +1148,15 @@ class HdhiveSign(_PluginBase):
             "username": "",
             "password": ""
         }
+        except Exception as e:
+            logger.error(f"get_form 异常: {e}", exc_info=True)
+            return [], {}
 
     def get_page(self) -> List[dict]:
         """
         构建插件详情页面，展示签到历史 (完全参照 qmjsign)
         """
+        try:
         historys = self.get_data('sign_history') or []
         user = self.get_data('hdhive_user_info') or {}
         consecutive_days = self.get_data('consecutive_days') or 0
@@ -1258,6 +1275,9 @@ class HdhiveSign(_PluginBase):
                 }
             ]
         }]
+        except Exception as e:
+            logger.error(f"get_page 异常: {e}", exc_info=True)
+            return []
 
     def get_api(self) -> List[Dict[str, Any]]:
         return []
