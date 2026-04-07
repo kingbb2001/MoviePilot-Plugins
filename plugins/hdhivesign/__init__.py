@@ -93,7 +93,7 @@ class HdhiveSign(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign 初始化 =============")
+        logger.info("============= hdhivesign 初始化开始 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -144,6 +144,8 @@ class HdhiveSign(_PluginBase):
 
         except Exception as e:
             logger.error(f"hdhivesign初始化错误: {str(e)}", exc_info=True)
+
+        logger.info("============= hdhivesign 初始化完成 =============")
 
     def sign(self, retry_count=0, extended_retry=0):
         """
@@ -860,10 +862,11 @@ class HdhiveSign(_PluginBase):
         )
 
     def get_state(self) -> bool:
-        logger.info(f"hdhivesign状态: {self._enabled}")
+        logger.info(f"hdhivesign get_state 被调用, enabled={self._enabled}")
         return self._enabled
 
     def get_service(self) -> List[Dict[str, Any]]:
+        logger.info(f"hdhivesign get_service 被调用, enabled={self._enabled}, cron={self._cron}")
         if self._enabled and self._cron:
             logger.info(f"注册定时服务: {self._cron}")
             return [{
@@ -879,6 +882,7 @@ class HdhiveSign(_PluginBase):
         """
         返回插件配置的表单
         """
+        logger.info("hdhivesign get_form 被调用")
         return [
             {
                 'component': 'VForm',
