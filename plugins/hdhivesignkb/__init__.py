@@ -1,6 +1,6 @@
 """
 影巢签到插件
-版本: 1.6.1
+版本: 2.0.0
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.0.0: 重大更新：1)添加独立代理配置（支持HTTP/SOCKS5/系统代理/直连） 2)重写自动登录逻辑：使用actionId服务+Server Action方式 3)所有网络请求统一走插件代理配置
 - v1.6.1: 修复插件目录名与ID不匹配导致的404安装失败
 - v1.4.0: 修复插件市场注册问题（添加根目录 package.json）
 - v1.3.0: 用户信息卡片美化；通知追加用户摘要；重复签到与执行前预拉取用户信息；RSC解析兜底
@@ -47,7 +48,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "1.6.1"
+    plugin_version = "2.0.0"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -83,6 +84,63 @@ class HdhiveSignKB(_PluginBase):
         "/api/customer/auth/login",
     ]
     _login_page = "/login"
+    # actionId 服务（用于获取 Next.js Server Action ID）
+    _action_id_url = "https://hdhive.ckid.workers.dev"
+
+    def _get_proxies(self):
+        """
+        根据代理模式返回代理配置
+        返回值: requests/cloudscraper 可用的 proxies dict，或 None 表示不走代理
+        """
+        mode = getattr(self, '_proxy_mode', 'system')
+        if mode == "none":
+            return None
+        elif mode in ("http", "socks5"):
+            url = getattr(self, '_proxy_url', '').strip()
+            if url:
+                # 确保有协议前缀
+                if not url.startswith('http') and not url.startswith('socks'):
+                    if mode == "socks5":
+                        url = f"socks5://{url}"
+                    else:
+                        url = f"http://{url}"
+                return {'http': url, 'https': url}
+            else:
+                logger.warning(f"代理模式为{mode}但未配置代理地址，回退到系统代理")
+        # system 或自定义模式为空时都走系统代理
+        try:
+            return settings.PROXY
+        except Exception:
+            return None
+
+    def _get_playwright_proxy(self):
+        """
+        为 Playwright 返回代理配置
+        返回值: {"server": "..."} 或 None
+        """
+        mode = getattr(self, '_proxy_mode', 'system')
+        if mode == "none":
+            return None
+        elif mode in ("http", "socks5"):
+            url = getattr(self, '_proxy_url', '').strip()
+            if url:
+                if not url.startswith('http') and not url.startswith('socks'):
+                    if mode == "socks5":
+                        url = f"socks5://{url}"
+                    else:
+                        url = f"http://{url}"
+                return {"server": url}
+            else:
+                logger.warning(f"Playwright: 代理模式为{mode}但未配置代理地址，尝试系统代理")
+        # 尝试系统代理
+        try:
+            pxy = settings.PROXY or {}
+            server = pxy.get('http') or pxy.get('https')
+            if server:
+                return {"server": server}
+        except Exception:
+            pass
+        return None
 
     def init_plugin(self, config: dict = None):
         # 停止现有任务
@@ -107,6 +165,10 @@ class HdhiveSignKB(_PluginBase):
                 self._history_days = int(config.get("history_days", 30))
                 self._username = (config.get("username") or "").strip()
                 self._password = (config.get("password") or "").strip()
+                # 代理配置
+                self._proxy_mode = config.get("proxy_mode") or "system"
+                self._proxy_url = (config.get("proxy_url") or "").strip()
+                logger.info(f"影巢签到插件已加载，配置：enabled={self._enabled}, notify={self._notify}, cron={self._cron}, proxy_mode={self._proxy_mode}")
                 logger.info(f"影巢签到插件已加载，配置：enabled={self._enabled}, notify={self._notify}, cron={self._cron}")
             
             # 清理所有可能的延长重试任务
@@ -129,7 +191,9 @@ class HdhiveSignKB(_PluginBase):
                     "base_url": self._base_url,
                     "max_retries": self._max_retries,
                     "retry_interval": self._retry_interval,
-                    "history_days": self._history_days
+                    "history_days": self._history_days,
+                    "proxy_mode": self._proxy_mode,
+                    "proxy_url": self._proxy_url
                 })
 
                 # 启动任务
@@ -504,7 +568,7 @@ class HdhiveSignKB(_PluginBase):
             except Exception as e:
                 logger.warning(f"从Token中解析用户ID失败，将使用默认Referer: {e}")
 
-            proxies = settings.PROXY
+            proxies = self._get_proxies()
             ua = settings.USER_AGENT
 
             headers = {
@@ -615,7 +679,7 @@ class HdhiveSignKB(_PluginBase):
                 'Referer': referer,
                 'Authorization': f'Bearer {token}',
             }
-            resp = requests.get(self._user_info_api, headers=headers, cookies=cookies, proxies=settings.PROXY, timeout=30, verify=False)
+            resp = requests.get(self._user_info_api, headers=headers, cookies=cookies, proxies=self._get_proxies(), timeout=30, verify=False)
             logger.info(f"拉取用户信息 API 状态码: {getattr(resp,'status_code','unknown')} CT: {getattr(resp.headers,'get',lambda k:'' )('Content-Type')}")
             data = {}
             try:
@@ -647,7 +711,7 @@ class HdhiveSignKB(_PluginBase):
                         'rsc': '1',
                     }
                     rsc_url = referer
-                    rsc_resp = requests.get(rsc_url, headers=rsc_headers, cookies=cookies, proxies=settings.PROXY, timeout=30, verify=False)
+                    rsc_resp = requests.get(rsc_url, headers=rsc_headers, cookies=cookies, proxies=self._get_proxies(), timeout=30, verify=False)
                     logger.info(f"RSC 用户页状态码: {getattr(rsc_resp,'status_code','unknown')} CT: {getattr(rsc_resp.headers,'get',lambda k:'' )('Content-Type')}")
                     rsc_text = rsc_resp.text or ''
                     import re as _re
@@ -1016,6 +1080,50 @@ class HdhiveSignKB(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
+                                    'md': 4
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSelect',
+                                        'props': {
+                                            'model': 'proxy_mode',
+                                            'label': '代理模式',
+                                            'items': [
+                                                {'title': '使用系统代理（MoviePilot设置中的代理）', 'value': 'system'},
+                                                {'title': '自定义HTTP代理', 'value': 'http'},
+                                                {'title': '自定义SOCKS5代理', 'value': 'socks5'},
+                                                {'title': '不走代理（直连）', 'value': 'none'}
+                                            ]
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 8
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'proxy_url',
+                                            'label': '代理地址（自定义模式时填写）',
+                                            'placeholder': '例如：http://127.0.0.1:7890 或 socks5://127.0.0.1:7891'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
                                     'md': 3
                                 },
                                 'content': [
@@ -1098,7 +1206,7 @@ class HdhiveSignKB(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '【使用教程】\n1. 登录影巢站点（具体域名请在上方“站点地址”中填写），按F12打开开发者工具。\n2. 切换到"应用(Application)" -> "Cookie"，或"网络(Network)"选项卡，找到发往API的请求。\n3. 复制完整的Cookie字符串。\n4. 确保Cookie中包含 `token` 和 `csrf_access_token` 字段。\n5. 粘贴到上方输入框，启用插件并保存。\n\n⚠️ 影巢可能变更域名，若签到异常请先更新“站点地址”。插件会自动使用系统配置的代理。'
+                                            'text': '【使用教程】\n1. 登录影巢站点（具体域名请在上方"站点地址"中填写），按F12打开开发者工具。\n2. 切换到"应用(Application)" -> "Cookie"，或"网络(Network)"选项卡，找到发往API的请求。\n3. 复制完整的Cookie字符串。\n4. 确保Cookie中包含 `token` 和 `csrf_access_token` 字段。\n5. 粘贴到上方输入框，启用插件并保存。\n\n⚠️ 影巢可能变更域名，若签到异常请先更新"站点地址"。\n🌐 代理设置：影巢是国外站点，需要代理才能访问。可在上方选择代理模式。'
                                         }
                                     }
                                 ]
@@ -1118,7 +1226,9 @@ class HdhiveSignKB(_PluginBase):
             "retry_interval": 30,
             "history_days": 30,
             "username": "",
-            "password": ""
+            "password": "",
+            "proxy_mode": "system",
+            "proxy_url": ""
         }
 
     def get_page(self) -> List[dict]:
@@ -1336,10 +1446,22 @@ class HdhiveSignKB(_PluginBase):
             return None
 
     def _auto_login(self) -> Optional[str]:
+        """
+        自动登录获取 Cookie
+        登录流程（参考 qd-today 影巢 HAR 模板）:
+        1. 从 actionId 服务获取 Next.js Server Action ID
+        2. 使用 Server Action 方式登录
+        3. 从登录响应中提取 Cookie
+        """
         try:
             if not getattr(self, "_username", None) or not getattr(self, "_password", None):
                 logger.warning("未配置用户名或密码，无法自动登录")
                 return None
+
+            # 获取代理配置
+            proxies = self._get_proxies()
+            login_url = f"{self._base_url}{self._login_page}"
+
             try:
                 import cloudscraper
                 scraper = cloudscraper.create_scraper()
@@ -1348,15 +1470,114 @@ class HdhiveSignKB(_PluginBase):
                 logger.warning(f"cloudscraper 不可用，将尝试 requests：{e}")
                 scraper = requests
                 logger.info("自动登录: 回退到 requests")
-            # 预热登录页，拿到初始 Cookie
-            login_url = f"{self._base_url}{self._login_page}"
+
+            # ========== 第一步：从 actionId 服务获取 Server Action ID ==========
+            action_id = None
             try:
-                logger.info(f"自动登录: 预热 {login_url}")
-                resp_warm = scraper.get(login_url, timeout=30, proxies=settings.PROXY)
-                logger.info(f"自动登录: 预热状态码 {getattr(resp_warm, 'status_code', 'unknown')} Content-Type {getattr(resp_warm.headers, 'get', lambda k: '')('Content-Type')}")
-            except Exception:
-                pass
-            # 尝试 API 登录候选
+                logger.info(f"自动登录: 获取 actionId from {self._action_id_url}")
+                action_resp = scraper.post(
+                    self._action_id_url,
+                    json={"domain": self._base_url.replace("https://", "").replace("http://", "")},
+                    timeout=30,
+                    proxies=proxies
+                )
+                logger.info(f"自动登录: actionId 状态码 {getattr(action_resp, 'status_code', 'unknown')}")
+                action_text = getattr(action_resp, 'text', '') or ''
+                import re as _re
+                m = _re.search(r'"actionId"\s*:\s*"([a-fA-F0-9]{16,64})"', action_text)
+                if m:
+                    action_id = m.group(1)
+                    logger.info(f"自动登录: 获取到 actionId={action_id}")
+                else:
+                    logger.warning(f"自动登录: 未能在响应中提取到 actionId，响应内容: {action_text[:200]}")
+            except Exception as e:
+                logger.warning(f"自动登录: 获取 actionId 失败: {e}")
+
+            if not action_id:
+                # 回退：尝试从预热页面提取 next-action token
+                logger.info("自动登录: actionId 获取失败，尝试从页面提取 next-action")
+                try:
+                    resp_warm = scraper.get(login_url, timeout=30, proxies=proxies)
+                    warm_text = getattr(resp_warm, 'text', '') or ''
+                    m = _re.search(r'next-action"\s*:\s*"([a-fA-F0-9]{16,64})"', warm_text)
+                    if not m:
+                        m = _re.search(r'name="next-action"\s+value="([a-fA-F0-9]{16,64})"', warm_text)
+                    if m:
+                        action_id = m.group(1)
+                        logger.info(f"自动登录: 从页面提取到 next-action={action_id}")
+                except Exception as e:
+                    logger.debug(f"自动登录: 从页面提取 next-action 失败: {e}")
+
+            # ========== 第二步：使用 Server Action 登录 ==========
+            if action_id:
+                url = f"{self._base_url}{self._login_page}"
+                headers = {
+                    'User-Agent': settings.USER_AGENT,
+                    'Accept': 'text/x-component',
+                    'Origin': self._base_url,
+                    'Referer': login_url,
+                    'Content-Type': 'text/plain;charset=UTF-8',
+                    'Next-Action': action_id,
+                    'next-router-state-tree': '%5B%22%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22login%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2Flogin%22%2C%22refresh%22%5D%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D%7D%2Cnull%2Cnull%2Ctrue%5D'
+                }
+                body = json.dumps([{"username": getattr(self, "_username", ""), "password": getattr(self, "_password", "")}, "/"])
+
+                try:
+                    logger.info(f"自动登录: Server Action 登录 {url} (actionId={action_id[:16]}...)")
+                    resp = scraper.post(url, headers=headers, data=body, timeout=30, proxies=proxies)
+                    status_code = getattr(resp, 'status_code', 'unknown')
+                    content_type = getattr(resp.headers, 'get', lambda k: '')('Content-Type')
+                    logger.info(f"自动登录: SA 登录状态码 {status_code} Content-Type {content_type}")
+
+                    # 提取 Cookie
+                    cookies_dict = {}
+                    try:
+                        cookies_dict = getattr(resp, 'cookies', None).get_dict() if getattr(resp, 'cookies', None) else {}
+                    except Exception:
+                        pass
+
+                    token_cookie = cookies_dict.get('token')
+                    csrf_cookie = cookies_dict.get('csrf_access_token')
+
+                    # 如果 Set-Cookie 中没有 token，尝试从响应体中解析
+                    if not token_cookie:
+                        try:
+                            resp_text = getattr(resp, 'text', '') or ''
+                            # 尝试 JSON 响应
+                            try:
+                                data = resp.json()
+                                if isinstance(data, dict):
+                                    meta = data.get('meta') or data.get('data') or {}
+                                    acc = meta.get('access_token') or meta.get('token')
+                                    if acc:
+                                        token_cookie = acc
+                                        logger.info(f"自动登录: 从响应JSON中提取到 token")
+                            except Exception:
+                                pass
+                            # 尝试正则从文本中提取
+                            if not token_cookie:
+                                tm = _re.search(r'"token"\s*:\s*"([^"]+)"', resp_text)
+                                if tm:
+                                    token_cookie = tm.group(1)
+                                    logger.info(f"自动登录: 从响应文本中正则提取到 token")
+                        except Exception:
+                            pass
+
+                    if token_cookie:
+                        cookie_items = [f"token={token_cookie}"]
+                        if csrf_cookie:
+                            cookie_items.append(f"csrf_access_token={csrf_cookie}")
+                        cookie_str = "; ".join(cookie_items)
+                        logger.info("Server Action 登录成功，已生成Cookie")
+                        return cookie_str
+                    else:
+                        logger.warning(f"自动登录: SA 登录未返回 token cookie, 响应内容: {getattr(resp.text, '')[:300] if hasattr(resp,'text') else 'N/A'}")
+
+                except Exception as e:
+                    logger.warning(f"Server Action 登录失败: {e}")
+
+            # ========== 第三步：回退 - API 登录候选 ==========
+            logger.info("自动登录: Server Action 失败，尝试传统 API 登录...")
             for path in self._login_api_candidates:
                 url = f"{self._base_url}{path}"
                 headers = {
@@ -1372,14 +1593,13 @@ class HdhiveSignKB(_PluginBase):
                 }
                 try:
                     logger.info(f"自动登录: 尝试 API 登录 {url}")
-                    resp = scraper.post(url, headers=headers, json=payload, timeout=30, proxies=settings.PROXY)
+                    resp = scraper.post(url, headers=headers, json=payload, timeout=30, proxies=proxies)
                     logger.info(f"自动登录: API 登录状态码 {getattr(resp, 'status_code', 'unknown')} Content-Type {getattr(resp.headers, 'get', lambda k: '')('Content-Type')}")
-                    # 成功条件：响应包含 set-cookie 或 JSON 内含 meta.access_token
-                    cookies_dict = None
+                    cookies_dict = {}
                     try:
                         cookies_dict = getattr(resp, 'cookies', None).get_dict() if getattr(resp, 'cookies', None) else {}
                     except Exception:
-                        cookies_dict = {}
+                        pass
                     token_cookie = cookies_dict.get('token')
                     csrf_cookie = cookies_dict.get('csrf_access_token')
                     if not token_cookie:
@@ -1388,17 +1608,8 @@ class HdhiveSignKB(_PluginBase):
                             logger.info(f"自动登录: API 登录返回JSON keys {list(data.keys()) if isinstance(data, dict) else 'non-dict'}")
                             meta = (data.get('meta') or {})
                             acc = meta.get('access_token')
-                            ref = meta.get('refresh_token')
                             if acc:
-                                # 将 access_token 写入 token Cookie
-                                if hasattr(scraper, 'cookies'):
-                                    try:
-                                        scraper.cookies.set('token', acc, domain=self._base_url.replace('https://','').replace('http://',''))
-                                        token_cookie = acc
-                                    except Exception:
-                                        token_cookie = acc
-                                else:
-                                    token_cookie = acc
+                                token_cookie = acc
                         except Exception:
                             pass
                     if token_cookie:
@@ -1406,76 +1617,24 @@ class HdhiveSignKB(_PluginBase):
                         if csrf_cookie:
                             cookie_items.append(f"csrf_access_token={csrf_cookie}")
                         cookie_str = "; ".join(cookie_items)
-                        logger.info("API登录成功，已生成Cookie")
+                        logger.info("API 登录成功，已生成Cookie")
                         return cookie_str
                 except Exception as e:
-                    logger.debug(f"API登录候选失败: {path} -> {e}")
-            # 尝试 Next.js Server Action 登录
-            url = f"{self._base_url}{self._login_page}"
-            headers = {
-                'User-Agent': settings.USER_AGENT,
-                'Accept': 'text/x-component',
-                'Origin': self._base_url,
-                'Referer': login_url,
-                'Content-Type': 'text/plain;charset=UTF-8'
-            }
-            # 从预热页面尝试提取 next-action token
-            next_action_token = None
-            try:
-                warm_text = getattr(resp_warm, 'text', '') or ''
-                # 常见形式：next-action":"<token>" 或 name="next-action" value="<token>"
-                import re as _re
-                m = _re.search(r'next-action"\s*:\s*"([a-fA-F0-9]{16,64})"', warm_text)
-                if not m:
-                    m = _re.search(r'name="next-action"\s+value="([a-fA-F0-9]{16,64})"', warm_text)
-                if m:
-                    next_action_token = m.group(1)
-                    headers['next-action'] = next_action_token
-                    # 参考样例的最小 router state（静态值）
-                    headers['next-router-state-tree'] = '%5B%22%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22login%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2Flogin%22%2C%22refresh%22%5D%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D%7D%2Cnull%2Cnull%2Ctrue%5D'
-                    logger.info(f"自动登录: 提取 next-action={next_action_token}")
-                else:
-                    logger.info("自动登录: 未在页面提取到 next-action token")
-            except Exception as e:
-                logger.debug(f"自动登录: 提取 next-action 失败: {e}")
-            body = json.dumps([{'username': getattr(self, "_username", ""), 'password': getattr(self, "_password", "")}])
-            try:
-                logger.info(f"自动登录: 尝试 Server Action 登录 {url}")
-                resp = scraper.post(url, headers=headers, data=body, timeout=30, proxies=settings.PROXY)
-                logger.info(f"自动登录: SA 登录状态码 {getattr(resp, 'status_code', 'unknown')} Content-Type {getattr(resp.headers, 'get', lambda k: '')('Content-Type')}")
-                cookies_dict = None
-                try:
-                    cookies_dict = getattr(resp, 'cookies', None).get_dict() if getattr(resp, 'cookies', None) else {}
-                except Exception:
-                    cookies_dict = {}
-                token_cookie = cookies_dict.get('token')
-                csrf_cookie = cookies_dict.get('csrf_access_token')
-                if token_cookie:
-                    cookie_items = [f"token={token_cookie}"]
-                    if csrf_cookie:
-                        cookie_items.append(f"csrf_access_token={csrf_cookie}")
-                    cookie_str = "; ".join(cookie_items)
-                    logger.info("Server Action 登录成功，已生成Cookie")
-                    return cookie_str
-            except Exception as e:
-                logger.warning(f"Server Action 登录失败: {e}")
-            # 浏览器自动化兜底：使用 Playwright 直接执行页面登录并读取 Cookie
+                    logger.debug(f"API 登录候选失败: {path} -> {e}")
+
+            # ========== 第四步：Playwright 浏览器自动化兜底 ==========
             try:
                 from playwright.sync_api import sync_playwright
                 logger.info("自动登录: 尝试使用 Playwright 浏览器自动化")
-                proxy = None
-                try:
-                    pxy = settings.PROXY or {}
-                    server = pxy.get('http') or pxy.get('https')
-                    if server:
-                        proxy = {"server": server}
-                except Exception:
-                    proxy = None
+                proxy = self._get_playwright_proxy()
                 with sync_playwright() as pw:
-                    browser = pw.chromium.launch(headless=True, proxy=proxy) if proxy else pw.chromium.launch(headless=True)
+                    launch_args = {"headless": True}
+                    if proxy:
+                        launch_args["proxy"] = proxy
+                    browser = pw.chromium.launch(**launch_args)
                     context = browser.new_context()
                     page = context.new_page()
-                    page.goto(login_url, wait_until="domcontentloaded")
+                    page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
                     # 选择器启发式
                     selectors = [
                         "input[name='username']",
@@ -1504,7 +1663,6 @@ class HdhiveSignKB(_PluginBase):
                                 break
                         except Exception:
                             continue
-                    # 点击提交按钮
                     try:
                         btn = page.query_selector("button[type='submit']") or page.query_selector("button:has-text('登录')") or page.query_selector("button:has-text('Login')")
                         if btn:
@@ -1513,12 +1671,10 @@ class HdhiveSignKB(_PluginBase):
                             page.keyboard.press("Enter")
                     except Exception:
                         page.keyboard.press("Enter")
-                    # 等待可能的跳转或网络静止
                     try:
                         page.wait_for_load_state("networkidle", timeout=10000)
                     except Exception:
                         pass
-                    # 读取 Cookie
                     cookies = context.cookies()
                     token_cookie = None
                     csrf_cookie = None
@@ -1542,6 +1698,7 @@ class HdhiveSignKB(_PluginBase):
                 logger.error(f"Playwright 自动登录异常: {e}")
                 logger.error("自动登录失败，未获取到有效Cookie")
                 return None
+
         except Exception as e:
             logger.error(f"自动登录异常: {str(e)}")
             return None
