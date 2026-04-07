@@ -1387,6 +1387,27 @@ class HdhiveSignKB(_PluginBase):
             # 头像处理：无头像或URL无效时使用用户名首字母作为占位
             _avatar_valid = bool(avatar and avatar.startswith(('http://', 'https://', '/')))
             _avatar_initial = (nickname or 'U')[0].upper() if nickname and nickname != '—' else 'U'
+            # 构建 VAvatar 的 content
+            if _avatar_valid:
+                # 有效头像：显示图片，加载失败时显示字母占位
+                _avatar_content = [
+                    {'component': 'img',
+                     'props': {'src': avatar, 'alt': nickname,
+                               'onerror': "this.style.display='none';this.nextElementSibling.style.display='flex';"}},
+                    {'component': 'div',
+                     'props': {'style': 'display:none;width:100%;height:100%;border-radius:50%;'
+                                      'background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);'
+                                      'justify-content:center;align-items:center;color:#fff;font-size:24px;'
+                                      'font-weight:bold;',
+                              'class': 'd-flex'},
+                     'text': _avatar_initial}
+                ]
+                _avatar_props = {'size': 64}
+            else:
+                # 无效头像：直接显示首字母圆形占位
+                _avatar_content = [{'component': 'span', 'props': {'style': 'font-size:24px;font-weight:bold;color:#fff'}, 'text': _avatar_initial}]
+                _avatar_props = {'size': 64, 'color': 'primary'}
+            
             info_card = [{
                 'component': 'VCard',
                 'props': {'variant': 'outlined', 'class': 'mb-4'},
@@ -1402,24 +1423,7 @@ class HdhiveSignKB(_PluginBase):
                                     {'component': 'div', 'props': {'class': 'text-caption'}, 'text': f'加入时间：{created_at}'}
                                 ]
                             },
-                            # 有有效头像URL时显示图片，否则显示首字母圆形占位
-                            {'component': 'VAvatar',
-                             'props': {'size': 64, 'color': 'primary' if not _avatar_valid else None},
-                             'content': (
-                                 [{'component': 'img',
-                                   'props': {'src': avatar, 'alt': nickname,
-                                             'onerror': "this.style.display='none';this.nextElementSibling.style.display='flex';"},
-                                  },
-                                  {'component': 'div',
-                                   'props': {'style': 'display:none;width:100%;height:100%;border-radius:50%;'
-                                                    'background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);'
-                                                    'justify-content:center;align-items:center;color:#fff;font-size:24px;'
-                                                    'font-weight:bold;',
-                                            'class': 'd-flex'},
-                                   'text': _avatar_initial}
-                                 ] if _avatar_valid else [_avatar_initial])
-                             }
-                             if _avatar_valid else [{'component': 'span', 'props': {'style': 'font-size:24px;font-weight:bold;color:#fff'}, 'text': _avatar_initial}]}
+                            {'component': 'VAvatar', 'props': _avatar_props, 'content': _avatar_content}
                         ]
                     },
                     {'component': 'VDivider'},
