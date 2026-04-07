@@ -1,6 +1,6 @@
 """
 影巢签到插件
-版本: 2.3.1
+版本: 2.3.2
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.3.2: 优化用户信息获取策略（内部API优先+Open API降次选+404静默+RSC增强日志）
 - v2.3.1: 补充版本历史记录完整性（补全v1.5.0/v1.6.0/v2.1.1/v2.2.2缺失条目）+版本号递增确保插件市场可识别更新
 - v2.3.0: 新增Open API用户信息获取（多路径探测）+头像显示优化（无效URL自动降级为字母占位符）
 - v2.2.2: 修复签到重复执行检测+延长重试任务冲突+通知模板美化（用户信息卡片集成）
@@ -57,7 +58,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.3.1"
+    plugin_version = "2.3.2"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -168,7 +169,7 @@ class HdhiveSignKB(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign v2.3.1 初始化 =============")
+        logger.info("============= hdhivesign v2.3.2 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -727,8 +728,8 @@ class HdhiveSignKB(_PluginBase):
     def _fetch_user_info(self, cookies: Dict[str, str], token: str) -> Optional[dict]:
         """
         获取用户信息，按优先级尝试多种方式：
-        1. Open API（/api/open/user/me）— 影巢官方第三方接口，推荐
-        2. 内部 API（/api/customer/user/info）— 原有接口，可能 404
+        1. 内部 API（/api/customer/user/info）— 原有接口
+        2. Open API（/api/open/user/me）— 第三方接口（部分站点可能未部署）
         3. RSC 页面解析 — 兜底方案
         """
         try:
@@ -744,71 +745,7 @@ class HdhiveSignKB(_PluginBase):
             info = {}
             proxies = self._get_proxies()
 
-            # ========== 方式1：Open API（官方推荐，Base URL: /api/open/） ==========
-            open_api_paths = self._user_info_open_apis
-            for api_path in open_api_paths:
-                url = f"{self._base_url}{api_path}"
-                try:
-                    headers = {
-                        'User-Agent': settings.USER_AGENT,
-                        'Accept': 'application/json',
-                        'Origin': self._base_url,
-                        'Referer': referer,
-                        # Open API 支持两种认证：Cookie(token) 或 Authorization Bearer
-                        'Authorization': f'Bearer {token}',
-                    }
-                    resp = requests.get(url, headers=headers, cookies=cookies, proxies=proxies, timeout=30, verify=False)
-                    logger.info(f"Open API 用户信息 [{api_path}] 状态码: {getattr(resp,'status_code','unknown')}")
-                    if getattr(resp, 'status_code', None) == 200:
-                        data = {}
-                        try:
-                            data = resp.json()
-                        except Exception:
-                            continue
-                        # Open API 统一响应格式: {success, code, message, data, meta}
-                        detail = data.get('data') or {}
-                        if not isinstance(detail, dict):
-                            # 有些可能包一层 response.data
-                            detail = ((data.get('response') or {}).get('data')) if isinstance(data.get('response'), dict) else {}
-                        if isinstance(detail, dict) and (detail.get('nickname') or detail.get('username')):
-                            info = {
-                                'id': detail.get('id') or detail.get('user_id'),
-                                'nickname': detail.get('nickname') or detail.get('username') or detail.get('member_name'),
-                                'avatar_url': detail.get('avatar_url') or detail.get('gravatar_url') or '',
-                                'created_at': detail.get('created_at') or detail.get('joined_at'),
-                                # points 可能直接在顶层或在 user_meta 里
-                                'points': detail.get('points')
-                                    or ((detail.get('user_meta') or {}).get('points'))
-                                    or ((detail.get('meta') or {}).get('points')),
-                                'signin_days_total': detail.get('signin_days_total')
-                                    or detail.get('checkin_days')
-                                    or ((detail.get('user_meta') or {}).get('signin_days_total')),
-                                'warnings_nums': detail.get('warnings_nums'),
-                            }
-                            logger.info(f"Open API 用户信息获取成功: nickname={info.get('nickname')}, points={info.get('points')}")
-                            break
-                        elif data.get('success') is True and isinstance(detail, dict):
-                            # success=True 但字段名可能不同，先存下来
-                            info = {
-                                'id': detail.get('id'),
-                                'nickname': detail.get('nickname') or detail.get('username'),
-                                'avatar_url': detail.get('avatar_url') or '',
-                                'created_at': detail.get('created_at'),
-                                'points': detail.get('points'),
-                                'signin_days_total': detail.get('signin_days_total'),
-                                'warnings_nums': detail.get('warnings_nums'),
-                            }
-                            break
-                    elif getattr(resp, 'status_code', None) == 401:
-                        logger.debug(f"Open API [{api_path}] 返回 401 未授权")
-                    elif getattr(resp, 'status_code', None) == 403:
-                        logger.debug(f"Open API [{api_path}] 返回 403 无权限（可能需要 Premium）")
-                    elif getattr(resp, 'status_code', None) == 404:
-                        logger.debug(f"Open API [{api_path}] 返回 404 不存在")
-                except Exception as e:
-                    logger.debug(f"Open API [{api_path}] 请求异常: {e}")
-
-            # ========== 方式2：内部 API（原有逻辑） ==========
+            # ========== 方式1：内部 API（原有逻辑，优先） ==========
             if not info.get('nickname'):
                 try:
                     headers = {
@@ -839,8 +776,69 @@ class HdhiveSignKB(_PluginBase):
                                 'signin_days_total': ((detail.get('user_meta') or {}).get('signin_days_total')) if info.get('signin_days_total') is None else info.get('signin_days_total'),
                                 'warnings_nums': detail.get('warnings_nums'),
                             })
+                            logger.info(f"内部API 用户信息获取成功: nickname={info.get('nickname')}, points={info.get('points')}")
                 except Exception as e:
                     logger.debug(f"内部API 用户信息请求异常: {e}")
+
+            # ========== 方式2：Open API（官方第三方接口，可能未部署，降级为次选） ==========
+            if not info.get('nickname') or info.get('points') is None or info.get('signin_days_total') is None:
+                open_api_paths = self._user_info_open_apis
+                for api_path in open_api_paths:
+                    url = f"{self._base_url}{api_path}"
+                    try:
+                        headers = {
+                            'User-Agent': settings.USER_AGENT,
+                            'Accept': 'application/json',
+                            'Origin': self._base_url,
+                            'Referer': referer,
+                            'Authorization': f'Bearer {token}',
+                        }
+                        resp = requests.get(url, headers=headers, cookies=cookies, proxies=proxies, timeout=30, verify=False)
+                        status_code = getattr(resp, 'status_code', None)
+                        # 仅在非404时记录日志，404说明该API路径未部署，避免刷屏
+                        if status_code == 200:
+                            logger.info(f"Open API 用户信息 [{api_path}] 状态码: {status_code}")
+                        elif status_code != 404:
+                            logger.debug(f"Open API 用户信息 [{api_path}] 状态码: {status_code}")
+                        # else: 404 静默跳过，不输出日志
+                        if status_code == 200:
+                            data = {}
+                            try:
+                                data = resp.json()
+                            except Exception:
+                                continue
+                            detail = data.get('data') or {}
+                            if not isinstance(detail, dict):
+                                detail = ((data.get('response') or {}).get('data')) if isinstance(data.get('response'), dict) else {}
+                            if isinstance(detail, dict) and (detail.get('nickname') or detail.get('username')):
+                                info = {
+                                    'id': detail.get('id') or detail.get('user_id'),
+                                    'nickname': detail.get('nickname') or detail.get('username') or detail.get('member_name'),
+                                    'avatar_url': detail.get('avatar_url') or detail.get('gravatar_url') or '',
+                                    'created_at': detail.get('created_at') or detail.get('joined_at'),
+                                    'points': detail.get('points')
+                                        or ((detail.get('user_meta') or {}).get('points'))
+                                        or ((detail.get('meta') or {}).get('points')),
+                                    'signin_days_total': detail.get('signin_days_total')
+                                        or detail.get('checkin_days')
+                                        or ((detail.get('user_meta') or {}).get('signin_days_total')),
+                                    'warnings_nums': detail.get('warnings_nums'),
+                                }
+                                logger.info(f"Open API 用户信息获取成功: nickname={info.get('nickname')}, points={info.get('points')}")
+                                break
+                            elif data.get('success') is True and isinstance(detail, dict):
+                                info = {
+                                    'id': detail.get('id'),
+                                    'nickname': detail.get('nickname') or detail.get('username'),
+                                    'avatar_url': detail.get('avatar_url') or '',
+                                    'created_at': detail.get('created_at'),
+                                    'points': detail.get('points'),
+                                    'signin_days_total': detail.get('signin_days_total'),
+                                    'warnings_nums': detail.get('warnings_nums'),
+                                }
+                                break
+                    except Exception as e:
+                        logger.debug(f"Open API [{api_path}] 请求异常: {e}")
 
             # ========== 方式3：RSC 页面解析（兜底） ==========
             if not info.get('nickname') or info.get('points') is None or info.get('signin_days_total') is None:
@@ -873,6 +871,9 @@ class HdhiveSignKB(_PluginBase):
                         info['avatar_url'] = m_avatar.group(1)
                     if m_created:
                         info['created_at'] = m_created.group(1)
+                    # 输出RSC解析结果便于调试
+                    if info.get('nickname'):
+                        logger.info(f"RSC 兜底解析成功: nickname={info.get('nickname')}, points={info.get('points')}, signin_days={info.get('signin_days_total')}")
                     if (not info.get('nickname') or info.get('points') is None or info.get('signin_days_total') is None) and '"user":' in rsc_text:
                         user_json = self._extract_rsc_object(rsc_text, 'user')
                         if user_json:
@@ -888,10 +889,12 @@ class HdhiveSignKB(_PluginBase):
                                         info['points'] = meta.get('points')
                                     if meta.get('signin_days_total') is not None:
                                         info['signin_days_total'] = meta.get('signin_days_total')
+                                if info.get('nickname'):
+                                    logger.info(f"RSC JSON对象解析成功: nickname={info.get('nickname')}, points={info.get('points')}")
                             except Exception:
                                 pass
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"RSC 用户页解析异常: {e}")
             self.save_data('hdhive_user_info', info)
             return info
         except Exception as e:
