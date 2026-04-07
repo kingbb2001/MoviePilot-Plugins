@@ -316,7 +316,7 @@ class HdhiveSign(_PluginBase):
             except Exception:
                 pass
             
-            state, message = self._signin_base()
+            state, message, auth_failed = self._signin_base()
             
             if state:
                 logger.debug(f"签到API消息: {message}")
@@ -366,8 +366,8 @@ class HdhiveSign(_PluginBase):
                 # 签到失败, a real failure that needs retry
                 logger.error(f"影巢签到失败: {message}")
 
-                # 检测鉴权失败，尝试自动登录刷新 Cookie 后重试一次
-                if any(k in (message or "") for k in ["未配置Cookie", "缺少'token'", "未授权", "Unauthorized", "token", "csrf", "登录已过期", "过期", "expired"]):
+                # 检测鉴权失败（使用 auth_failed 标志或消息内容），尝试自动登录刷新 Cookie 后重试一次
+                if auth_failed or any(k in (message or "") for k in ["未配置Cookie", "缺少'token'", "未授权", "Unauthorized", "token", "csrf", "登录已过期", "过期", "expired"]):
                     logger.info("检测到Cookie或鉴权问题，尝试自动登录刷新Cookie后重试一次")
                     new_cookie = self._auto_login()
                     if new_cookie:
@@ -385,7 +385,7 @@ class HdhiveSign(_PluginBase):
                             "password": getattr(self, "_password", ""),
                         })
                         logger.info("自动登录成功，使用新Cookie重试签到")
-                        state2, message2 = self._signin_base()
+                        state2, message2, _ = self._signin_base()
                         if state2:
                             sign_status = "签到成功" if "签到" in (message2 or "") and "已" not in message2 else "已签到"
                             sign_dict = {
@@ -470,7 +470,7 @@ class HdhiveSign(_PluginBase):
             
             return sign_dict
 
-    def _signin_base(self) -> Tuple[bool, str]:
+    def _signin_base(self) -> Tuple[bool, str, bool]:
         """
         基于影巢API的签到实现
         """
@@ -482,13 +482,13 @@ class HdhiveSign(_PluginBase):
                         name, value = cookie_item.strip().split('=', 1)
                         cookies[name] = value
             else:
-                return False, "未配置Cookie"
+                return False, "未配置Cookie", True
 
             token = cookies.get('token')
             csrf_token = cookies.get('csrf_access_token')
 
             if not token:
-                return False, "Cookie中缺少'token'"
+                return False, "Cookie中缺少'token'", True
 
             user_id = None
             referer = self._site_url
@@ -523,13 +523,13 @@ class HdhiveSign(_PluginBase):
             )
 
             if signin_res is None:
-                return False, '签到请求失败，响应为空，请检查代理或网络环境'
+                return False, '签到请求失败，响应为空，请检查代理或网络环境', False
 
             try:
                 signin_result = signin_res.json()
             except json.JSONDecodeError:
                 logger.error(f"API响应JSON解析失败 (状态码 {signin_res.status_code}): {signin_res.text[:500]}")
-                return False, f'签到API响应格式错误，状态码: {signin_res.status_code}'
+                return False, f'签到API响应格式错误，状态码: {signin_res.status_code}', False
 
             message = signin_result.get('message', '无明确消息')
             
@@ -538,21 +538,24 @@ class HdhiveSign(_PluginBase):
                     self._fetch_user_info(cookies, token)
                 except Exception:
                     pass
-                return True, message
+                return True, message, False
 
             if "已经签到" in message or "签到过" in message:
                 try:
                     self._fetch_user_info(cookies, token)
                 except Exception:
                     pass
-                return True, message 
+                return True, message, False
 
             logger.error(f"签到失败, HTTP状态码: {signin_res.status_code}, 消息: {message}")
-            return False, message
+            # 检测是否为鉴权失败（401/403）
+            if signin_res.status_code in [401, 403]:
+                return False, message, True
+            return False, message, False
 
         except Exception as e:
             logger.error(f"签到流程发生未知异常", exc_info=True)
-            return False, f'签到异常: {str(e)}'
+            return False, f'签到异常: {str(e)}', False
 
     def _save_sign_history(self, sign_data):
         """
