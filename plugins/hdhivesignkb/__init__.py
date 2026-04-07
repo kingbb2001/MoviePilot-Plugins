@@ -1,6 +1,6 @@
 """
 影巢签到插件
-版本: 2.2.1
+版本: 2.3.0
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.3.0: 新增Open API用户信息获取（多路径探测）+头像显示优化（无效URL自动降级为字母占位符）
 - v2.2.1: 修复cloudscraper未安装时import直接崩溃导致自动登录完全失败（安全导入+requests回退）
 - v2.2.0: 修复代理保存丢失+Cookie提前刷新+登录流程优化(303处理+CF检测)
 - v2.1.0: 修复：1)用户名/密码保存后重新进入设置不再丢失 2)已签到场景正确识别（手动签过后不再重复重试3次） 3)API返回"已经签到"时标记为成功而非失败
@@ -51,7 +52,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.2.1"
+    plugin_version = "2.3.0"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -80,8 +81,21 @@ class HdhiveSignKB(_PluginBase):
     # 影巢站点配置（域名可配置）
     _base_url = "https://hdhive.com"
     _site_url = f"{_base_url}/"
+    # 签到接口
     _signin_api = f"{_base_url}/api/customer/user/checkin"
-    _user_info_api = f"{_base_url}/api/customer/user/info"
+    _signin_api_candidates = [
+        "/api/customer/user/checkin",      # 内部 API（主要）
+        "/api/open/user/checkin",          # Open API（候选）
+        "/api/open/checkin",               # Open API 备选路径
+    ]
+    # 用户信息接口（按优先级尝试）
+    _user_info_api = f"{_base_url}/api/customer/user/info"  # 内部 API（保留兼容）
+    _user_info_open_apis = [                                 # Open API 路径候选
+        "/api/open/user/me",
+        "/api/open/user/info",
+        "/api/open/user/profile",
+        "/api/open/users/me",
+    ]
     _login_api_candidates = [
         "/api/customer/user/login",
         "/api/customer/auth/login",
@@ -149,7 +163,7 @@ class HdhiveSignKB(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign v2.2.1 初始化 =============")
+        logger.info("============= hdhivesign v2.3.0 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -706,6 +720,12 @@ class HdhiveSignKB(_PluginBase):
             logger.error(f"保存签到历史记录失败: {str(e)}", exc_info=True)
 
     def _fetch_user_info(self, cookies: Dict[str, str], token: str) -> Optional[dict]:
+        """
+        获取用户信息，按优先级尝试多种方式：
+        1. Open API（/api/open/user/me）— 影巢官方第三方接口，推荐
+        2. 内部 API（/api/customer/user/info）— 原有接口，可能 404
+        3. RSC 页面解析 — 兜底方案
+        """
         try:
             referer = self._site_url
             try:
@@ -715,34 +735,109 @@ class HdhiveSignKB(_PluginBase):
                     referer = f"{self._base_url}/user/{user_id}"
             except Exception:
                 pass
-            headers = {
-                'User-Agent': settings.USER_AGENT,
-                'Accept': 'application/json, text/plain, */*',
-                'Origin': self._base_url,
-                'Referer': referer,
-                'Authorization': f'Bearer {token}',
-            }
-            resp = requests.get(self._user_info_api, headers=headers, cookies=cookies, proxies=self._get_proxies(), timeout=30, verify=False)
-            logger.info(f"拉取用户信息 API 状态码: {getattr(resp,'status_code','unknown')} CT: {getattr(resp.headers,'get',lambda k:'' )('Content-Type')}")
-            data = {}
-            try:
-                data = resp.json()
-            except Exception:
-                data = {}
-            # 统一解析 response.data / detail / data 结构
-            detail = (data.get('response') or {}).get('data') or data.get('detail') or data.get('data') or {}
-            if not isinstance(detail, dict):
-                detail = {}
-            info = {
-                'id': detail.get('id') or detail.get('member_id'),
-                'nickname': detail.get('nickname') or detail.get('member_name'),
-                'avatar_url': detail.get('avatar_url') or detail.get('gravatar_url'),
-                'created_at': detail.get('created_at'),
-                'points': ((detail.get('user_meta') or {}).get('points')),
-                'signin_days_total': ((detail.get('user_meta') or {}).get('signin_days_total')),
-                'warnings_nums': detail.get('warnings_nums'),
-            }
-            # 若 API 未返回完整信息，尝试 RSC 页面解析
+
+            info = {}
+            proxies = self._get_proxies()
+
+            # ========== 方式1：Open API（官方推荐，Base URL: /api/open/） ==========
+            open_api_paths = self._user_info_open_apis
+            for api_path in open_api_paths:
+                url = f"{self._base_url}{api_path}"
+                try:
+                    headers = {
+                        'User-Agent': settings.USER_AGENT,
+                        'Accept': 'application/json',
+                        'Origin': self._base_url,
+                        'Referer': referer,
+                        # Open API 支持两种认证：Cookie(token) 或 Authorization Bearer
+                        'Authorization': f'Bearer {token}',
+                    }
+                    resp = requests.get(url, headers=headers, cookies=cookies, proxies=proxies, timeout=30, verify=False)
+                    logger.info(f"Open API 用户信息 [{api_path}] 状态码: {getattr(resp,'status_code','unknown')}")
+                    if getattr(resp, 'status_code', None) == 200:
+                        data = {}
+                        try:
+                            data = resp.json()
+                        except Exception:
+                            continue
+                        # Open API 统一响应格式: {success, code, message, data, meta}
+                        detail = data.get('data') or {}
+                        if not isinstance(detail, dict):
+                            # 有些可能包一层 response.data
+                            detail = ((data.get('response') or {}).get('data')) if isinstance(data.get('response'), dict) else {}
+                        if isinstance(detail, dict) and (detail.get('nickname') or detail.get('username')):
+                            info = {
+                                'id': detail.get('id') or detail.get('user_id'),
+                                'nickname': detail.get('nickname') or detail.get('username') or detail.get('member_name'),
+                                'avatar_url': detail.get('avatar_url') or detail.get('gravatar_url') or '',
+                                'created_at': detail.get('created_at') or detail.get('joined_at'),
+                                # points 可能直接在顶层或在 user_meta 里
+                                'points': detail.get('points')
+                                    or ((detail.get('user_meta') or {}).get('points'))
+                                    or ((detail.get('meta') or {}).get('points')),
+                                'signin_days_total': detail.get('signin_days_total')
+                                    or detail.get('checkin_days')
+                                    or ((detail.get('user_meta') or {}).get('signin_days_total')),
+                                'warnings_nums': detail.get('warnings_nums'),
+                            }
+                            logger.info(f"Open API 用户信息获取成功: nickname={info.get('nickname')}, points={info.get('points')}")
+                            break
+                        elif data.get('success') is True and isinstance(detail, dict):
+                            # success=True 但字段名可能不同，先存下来
+                            info = {
+                                'id': detail.get('id'),
+                                'nickname': detail.get('nickname') or detail.get('username'),
+                                'avatar_url': detail.get('avatar_url') or '',
+                                'created_at': detail.get('created_at'),
+                                'points': detail.get('points'),
+                                'signin_days_total': detail.get('signin_days_total'),
+                                'warnings_nums': detail.get('warnings_nums'),
+                            }
+                            break
+                    elif getattr(resp, 'status_code', None) == 401:
+                        logger.debug(f"Open API [{api_path}] 返回 401 未授权")
+                    elif getattr(resp, 'status_code', None) == 403:
+                        logger.debug(f"Open API [{api_path}] 返回 403 无权限（可能需要 Premium）")
+                    elif getattr(resp, 'status_code', None) == 404:
+                        logger.debug(f"Open API [{api_path}] 返回 404 不存在")
+                except Exception as e:
+                    logger.debug(f"Open API [{api_path}] 请求异常: {e}")
+
+            # ========== 方式2：内部 API（原有逻辑） ==========
+            if not info.get('nickname'):
+                try:
+                    headers = {
+                        'User-Agent': settings.USER_AGENT,
+                        'Accept': 'application/json, text/plain, */*',
+                        'Origin': self._base_url,
+                        'Referer': referer,
+                        'Authorization': f'Bearer {token}',
+                    }
+                    resp = requests.get(self._user_info_api, headers=headers, cookies=cookies, proxies=proxies, timeout=30, verify=False)
+                    logger.info(f"内部API 用户信息 状态码: {getattr(resp,'status_code','unknown')} CT: {getattr(resp.headers,'get',lambda k:'' )('Content-Type')}")
+                    if getattr(resp, 'status_code', None) == 200:
+                        data = {}
+                        try:
+                            data = resp.json()
+                        except Exception:
+                            data = {}
+                        detail = (data.get('response') or {}).get('data') or data.get('detail') or data.get('data') or {}
+                        if not isinstance(detail, dict):
+                            detail = {}
+                        if detail.get('nickname') or detail.get('member_name'):
+                            info.update({
+                                'id': detail.get('id') or detail.get('member_id') or info.get('id'),
+                                'nickname': detail.get('nickname') or detail.get('member_name') or info.get('nickname'),
+                                'avatar_url': detail.get('avatar_url') or detail.get('gravatar_url') or info.get('avatar_url', ''),
+                                'created_at': detail.get('created_at') or info.get('created_at'),
+                                'points': ((detail.get('user_meta') or {}).get('points')) if info.get('points') is None else info.get('points'),
+                                'signin_days_total': ((detail.get('user_meta') or {}).get('signin_days_total')) if info.get('signin_days_total') is None else info.get('signin_days_total'),
+                                'warnings_nums': detail.get('warnings_nums'),
+                            })
+                except Exception as e:
+                    logger.debug(f"内部API 用户信息请求异常: {e}")
+
+            # ========== 方式3：RSC 页面解析（兜底） ==========
             if not info.get('nickname') or info.get('points') is None or info.get('signin_days_total') is None:
                 try:
                     rsc_headers = {
@@ -1289,6 +1384,9 @@ class HdhiveSignKB(_PluginBase):
             points = user.get('points') if user.get('points') is not None else '—'
             signin_days_total = user.get('signin_days_total') if user.get('signin_days_total') is not None else '—'
             created_at = user.get('created_at') or '—'
+            # 头像处理：无头像或URL无效时使用用户名首字母作为占位
+            _avatar_valid = bool(avatar and avatar.startswith(('http://', 'https://', '/')))
+            _avatar_initial = (nickname or 'U')[0].upper() if nickname and nickname != '—' else 'U'
             info_card = [{
                 'component': 'VCard',
                 'props': {'variant': 'outlined', 'class': 'mb-4'},
@@ -1304,7 +1402,24 @@ class HdhiveSignKB(_PluginBase):
                                     {'component': 'div', 'props': {'class': 'text-caption'}, 'text': f'加入时间：{created_at}'}
                                 ]
                             },
-                            {'component': 'VAvatar', 'props': {'size': 64}, 'content': [{'component': 'img', 'props': {'src': avatar, 'alt': nickname}}]}
+                            # 有有效头像URL时显示图片，否则显示首字母圆形占位
+                            {'component': 'VAvatar',
+                             'props': {'size': 64, 'color': 'primary' if not _avatar_valid else None},
+                             'content': (
+                                 [{'component': 'img',
+                                   'props': {'src': avatar, 'alt': nickname,
+                                             'onerror': "this.style.display='none';this.nextElementSibling.style.display='flex';"},
+                                  },
+                                  {'component': 'div',
+                                   'props': {'style': 'display:none;width:100%;height:100%;border-radius:50%;'
+                                                    'background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);'
+                                                    'justify-content:center;align-items:center;color:#fff;font-size:24px;'
+                                                    'font-weight:bold;',
+                                            'class': 'd-flex'},
+                                   'text': _avatar_initial}
+                                 ] if _avatar_valid else [_avatar_initial])
+                             }
+                             if _avatar_valid else [{'component': 'span', 'props': {'style': 'font-size:24px;font-weight:bold;color:#fff'}, 'text': _avatar_initial}]}
                         ]
                     },
                     {'component': 'VDivider'},
