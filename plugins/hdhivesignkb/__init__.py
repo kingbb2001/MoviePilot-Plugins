@@ -1,6 +1,6 @@
 ﻿"""
 影巢签到插件
-版本: 2.3.9
+版本: 2.4.0
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.4.0: 重构签到逻辑：提取_parse_cookie统一cookie解析、sign()方法从302行拆分为164行
 - v2.3.9: 重构：提取_save_config统一配置持久化，替换3处重复update_config调用
 - v2.3.8: 修复：1)combined_text定义未使用 2)方法内冗余import re as _re 3)init_plugin重复日志行
 - v2.3.7: 修复VAvatar组件嵌套三元表达式括号混乱导致插件加载后立即停止（从v2.3.0移植时误用了未修复的原始代码）
@@ -57,7 +58,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.3.9"
+    plugin_version = "2.4.0"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -91,6 +92,26 @@ class HdhiveSignKB(_PluginBase):
         if onlyonce is not None:
             cfg["onlyonce"] = onlyonce
         self.update_config(cfg)
+
+    def _parse_cookie(self) -> Tuple[Dict[str, str], Optional[str]]:
+        """
+        将字符串格式的 Cookie 解析为 requests 所需的 dict 和 token 字符串。
+        统一 cookie 解析逻辑，避免在多处重复写相同的解析代码。
+        注意：影巢 Cookie 格式为 "token=xxx; csrf_access_token=yyy"
+
+        Returns:
+            (cookies_dict, token)  — token 可能是 None（无 token 时）
+        """
+        cookies = {}
+        token = None
+        if self._cookie:
+            for cookie_item in self._cookie.split(';'):
+                if '=' in cookie_item:
+                    name, value = cookie_item.strip().split('=', 1)
+                    cookies[name] = value
+                    if name == 'token':
+                        token = value
+        return cookies, token
 
     # 可使用的用户级别
     auth_level = 2
@@ -181,7 +202,7 @@ class HdhiveSignKB(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign v2.3.7 初始化 =============")
+        logger.info("============= hdhivesign v2.4.0 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -233,14 +254,12 @@ class HdhiveSignKB(_PluginBase):
             retry_count: 常规重试计数
             extended_retry: 延长重试计数（0=首次尝试, 1=第一次延长重试, 2=第二次延长重试）
         """
-        # 设置执行超时保护
         start_time = datetime.now()
-        sign_timeout = 300  # 限制签到执行最长时间为5分钟
-        
-        # 保存当前执行的触发类型
+        sign_timeout = 300  # 5分钟超时保护
+
         self._current_trigger_type = "手动触发" if self._is_manual_trigger() else "定时触发"
-        
-        # 如果是定时任务且不是重试，检查是否有正在运行的延长重试任务
+
+        # 定时任务首次执行时，跳过有正在运行的延长重试任务
         if retry_count == 0 and extended_retry == 0 and not self._is_manual_trigger():
             if self._has_running_extended_retry():
                 logger.warning("检测到有正在运行的延长重试任务，跳过本次执行")
@@ -248,53 +267,44 @@ class HdhiveSignKB(_PluginBase):
                     "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
                     "status": "跳过: 有正在进行的重试任务"
                 }
-        
+
         logger.info("开始影巢签到")
         logger.debug(f"参数: retry={retry_count}, ext_retry={extended_retry}, trigger={self._current_trigger_type}")
 
-        notification_sent = False  # 标记是否已发送通知
-        sign_dict = None
-        sign_status = None  # 记录签到状态
-
-        # 根据重试情况记录日志
         if retry_count > 0:
             logger.debug(f"常规重试: 第{retry_count}次")
         if extended_retry > 0:
             logger.debug(f"延长重试: 第{extended_retry}次")
-        
+
         try:
+            # ── 1. 今日已签到，跳过 ─────────────────────────────────────────
             if not self._is_manual_trigger() and self._is_already_signed_today():
                 logger.info("根据历史记录，今日已成功签到，跳过本次执行")
-                
-                # 创建跳过记录
+
                 sign_dict = {
                     "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
                     "status": "跳过: 今日已签到",
                 }
-                
-                # 获取最后一次成功签到的记录信息
+
+                # 填充历史积分信息
                 history = self.get_data('sign_history') or []
                 today = datetime.now().strftime('%Y-%m-%d')
                 today_success = [
-                    record for record in history 
-                    if record.get("date", "").startswith(today) 
+                    record for record in history
+                    if record.get("date", "").startswith(today)
                     and record.get("status") in ["签到成功", "已签到"]
                 ]
-                
-                # 添加最后成功签到记录的详细信息
                 if today_success:
                     last_success = max(today_success, key=lambda x: x.get("date", ""))
-                    # 复制积分信息到跳过记录
                     sign_dict.update({
                         "message": last_success.get("message"),
                         "points": last_success.get("points"),
                         "days": last_success.get("days")
                     })
-                
-                # 发送通知 - 通知用户已经签到过了
+
+                # 发送通知
                 if self._notify:
                     last_sign_time = self._get_last_sign_time()
-                    
                     title = "【ℹ️ 影巢重复签到】"
                     text = (
                         f"📢 执行结果\n"
@@ -303,9 +313,7 @@ class HdhiveSignKB(_PluginBase):
                         f"📍 方式：{self._current_trigger_type}\n"
                         f"ℹ️ 状态：今日已完成签到 ({last_sign_time})\n"
                     )
-                    
-                    # 如果有积分信息，添加到通知中
-                    if "message" in sign_dict and sign_dict["message"]:
+                    if sign_dict.get("message"):
                         text += (
                             f"━━━━━━━━━━\n"
                             f"📊 签到信息\n"
@@ -313,31 +321,13 @@ class HdhiveSignKB(_PluginBase):
                             f"🎁 奖励：{sign_dict.get('points', '—')}\n"
                             f"📆 天数：{sign_dict.get('days', '—')}\n"
                         )
-                    
                     text += f"━━━━━━━━━━"
-                    
-                    self.post_message(
-                        mtype=NotificationType.SiteMessage,
-                        title=title,
-                        text=text
-                    )
-                try:
-                    cookies = {}
-                    if self._cookie:
-                        for cookie_item in self._cookie.split(';'):
-                            if '=' in cookie_item:
-                                name, value = cookie_item.strip().split('=', 1)
-                                cookies[name] = value
-                    token = cookies.get('token')
-                    if token:
-                        self._fetch_user_info(cookies, token)
-                except Exception:
-                    pass
-                
-                return sign_dict
-            
+                    self.post_message(mtype=NotificationType.SiteMessage, title=title, text=text)
+
+                return self._skip_today_signed(sign_dict)
+
+            # ── 2. 无 Cookie，尝试自动登录 ───────────────────────────────
             if not self._cookie:
-                # 尝试自动登录获取 Cookie
                 new_cookie = self._auto_login()
                 if new_cookie:
                     self._cookie = new_cookie
@@ -350,16 +340,15 @@ class HdhiveSignKB(_PluginBase):
                         "status": "签到失败: 未配置Cookie",
                     }
                     self._save_sign_history(sign_dict)
-                    
                     if self._notify:
                         self.post_message(
                             mtype=NotificationType.SiteMessage,
                             title="【影巢签到失败】",
                             text="❌ 未配置Cookie，且自动登录失败，请在设置中添加Cookie或用户名密码"
                         )
-                        notification_sent = True
                     return sign_dict
-            
+
+            # ── 3. 验证并按需刷新 Cookie ─────────────────────────────────
             logger.info("执行签到...")
 
             try:
@@ -370,141 +359,26 @@ class HdhiveSignKB(_PluginBase):
             except Exception:
                 pass
 
+            # ── 4. 预拉取用户信息 ────────────────────────────────────────
             try:
-                cookies = {}
-                if self._cookie:
-                    for cookie_item in self._cookie.split(';'):
-                        if '=' in cookie_item:
-                            name, value = cookie_item.strip().split('=', 1)
-                            cookies[name] = value
-                token = cookies.get('token')
+                cookies, token = self._parse_cookie()
                 if token:
                     logger.info("尝试预拉取用户信息用于页面展示")
                     self._fetch_user_info(cookies, token)
             except Exception:
                 pass
-            
+
+            # ── 5. 执行签到 API ─────────────────────────────────────────
             state, message = self._signin_base()
-            
+
             if state:
                 logger.debug(f"签到API消息: {message}")
-                
-                if "已经签到" in message or "签到过" in message:
-                    sign_status = "已签到"
-                else:
-                    sign_status = "签到成功"
-                
-                logger.debug(f"签到状态: {sign_status}")
-
-                # --- 核心修复：插件自身逻辑计算连续签到天数 ---
-                today_str = datetime.now().strftime('%Y-%m-%d')
-                last_date_str = self.get_data('last_success_date')
-                consecutive_days = self.get_data('consecutive_days', 0)
-
-                if last_date_str == today_str:
-                    # 当天重复运行，天数不变
-                    pass
-                elif last_date_str == (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'):
-                    # 连续签到，天数+1
-                    consecutive_days += 1
-                else:
-                    # 签到中断或首次签到，重置为1
-                    consecutive_days = 1
-                
-                # 更新连续签到数据
-                self.save_data('consecutive_days', consecutive_days)
-                self.save_data('last_success_date', today_str)
-
-                # 创建签到记录
-                sign_dict = {
-                    "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": sign_status,
-                    "message": message,
-                    "days": consecutive_days  # 使用计算出的天数
-                }
-                
-                # 解析奖励积分
-                points_match = re.search(r'获得 (\d+) 积分', message)
-                sign_dict['points'] = int(points_match.group(1)) if points_match else "—"
-
-                self._save_sign_history(sign_dict)
-                self._send_sign_notification(sign_dict)
-                return sign_dict
+                return self._handle_sign_success(state, message)
             else:
-                # 签到返回非成功
-                logger.error(f"影巢签到失败: {message}")
+                return self._handle_sign_failure(state, message, retry_count, extended_retry)
 
-                # ★ 关键修复：检测消息是否表明"已经签到过了"，如果是则视为成功，不重试
-                if "已经签到" in (message or "") or "签到过" in (message or "") or "重复签到" in (message or "") or "今日已签" in (message or ""):
-                    logger.info(f"API返回消息表明今日已签到（消息: {message}），标记为'已签到'，不重试")
-                    sign_status = "已签到"
-                    sign_dict = {
-                        "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
-                        "status": sign_status,
-                        "message": message,
-                    }
-                    self._save_sign_history(sign_dict)
-                    self._send_sign_notification(sign_dict)
-                    return sign_dict
-
-                # 检测鉴权失败，尝试自动登录刷新 Cookie 后重试一次
-                if any(k in (message or "") for k in ["未配置Cookie", "缺少'token'", "未授权", "Unauthorized", "token", "csrf", "登录已过期", "过期", "expired"]):
-                    logger.info("检测到Cookie或鉴权问题，尝试自动登录刷新Cookie后重试一次")
-                    new_cookie = self._auto_login()
-                    if new_cookie:
-                        self._cookie = new_cookie
-                        self._save_config()
-                        logger.info("自动登录成功，使用新Cookie重试签到")
-                        state2, message2 = self._signin_base()
-                        if state2:
-                            sign_status = "签到成功" if "签到" in (message2 or "") and "已" not in message2 else "已签到"
-                            sign_dict = {
-                                "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
-                                "status": sign_status,
-                                "message": message2,
-                            }
-                            # 解析奖励积分
-                            points_match = re.search(r'获得 (\d+) 积分', message2 or "")
-                            sign_dict['points'] = int(points_match.group(1)) if points_match else "—"
-                            self._save_sign_history(sign_dict)
-                            self._send_sign_notification(sign_dict)
-                            return sign_dict
-                
-                # 暂不保存失败记录，视重试策略决定是否写入
-                
-                # 常规重试逻辑
-                if retry_count < self._max_retries:
-                    logger.info(f"将在{self._retry_interval}秒后进行第{retry_count+1}次常规重试...")
-                    if self._notify:
-                        self.post_message(
-                            mtype=NotificationType.SiteMessage,
-                            title="【影巢签到重试】",
-                            text=f"❗ 签到失败: {message}，{self._retry_interval}秒后将进行第{retry_count+1}次常规重试"
-                        )
-                    time.sleep(self._retry_interval)
-                    return self.sign(retry_count + 1, extended_retry)
-                
-                # 所有重试都失败
-                sign_dict = {
-                    "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": f"签到失败: {message}",
-                    "message": message
-                }
-                self._save_sign_history(sign_dict)
-                
-                if self._notify:
-                    self.post_message(
-                        mtype=NotificationType.SiteMessage,
-                        title="【❌ 影巢签到失败】",
-                        text=f"❌ 签到失败: {message}，所有重试均已失败"
-                    )
-                    notification_sent = True
-                return sign_dict
-        
         except requests.RequestException as req_exc:
-            # 网络请求异常处理
             logger.error(f"网络请求异常: {str(req_exc)}")
-            # 添加执行超时检查
             if (datetime.now() - start_time).total_seconds() > sign_timeout:
                 logger.error("签到执行时间超过5分钟，执行超时")
                 sign_dict = {
@@ -512,15 +386,12 @@ class HdhiveSignKB(_PluginBase):
                     "status": "签到失败: 执行超时",
                 }
                 self._save_sign_history(sign_dict)
-                
-                if self._notify and not notification_sent:
+                if self._notify:
                     self.post_message(
                         mtype=NotificationType.SiteMessage,
                         title="【❌ 影巢签到失败】",
                         text="❌ 签到执行超时，已强制终止，请检查网络或站点状态"
                     )
-                    notification_sent = True
-                
                 return sign_dict
         except Exception as e:
             logger.error(f"影巢 签到异常: {str(e)}", exc_info=True)
@@ -529,16 +400,130 @@ class HdhiveSignKB(_PluginBase):
                 "status": f"签到失败: {str(e)}",
             }
             self._save_sign_history(sign_dict)
-            
-            if self._notify and not notification_sent:
+            if self._notify:
                 self.post_message(
                     mtype=NotificationType.SiteMessage,
                     title="【❌ 影巢签到失败】",
                     text=f"❌ 签到异常: {str(e)}"
                 )
-                notification_sent = True
-            
             return sign_dict
+
+
+    # ── 签到结果处理 ─────────────────────────────────────────────────────
+
+    def _skip_today_signed(self, sign_dict: dict) -> dict:
+        """
+        处理"今日已签到，跳过"分支。
+        发送通知并尝试拉取最新用户信息。
+        """
+        try:
+            cookies, token = self._parse_cookie()
+            if token:
+                self._fetch_user_info(cookies, token)
+        except Exception:
+            pass
+        return sign_dict
+
+    def _handle_sign_success(self, state: bool, message: str) -> Optional[dict]:
+        """
+        签到成功后的统一处理：计算连续天数、保存历史、发送通知。
+        """
+        if "已经签到" in message or "签到过" in message:
+            sign_status = "已签到"
+        else:
+            sign_status = "签到成功"
+
+        # 计算连续签到天数
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        last_date_str = self.get_data('last_success_date')
+        consecutive_days = self.get_data('consecutive_days', 0)
+
+        if last_date_str == today_str:
+            pass  # 当天重复运行，天数不变
+        elif last_date_str == (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'):
+            consecutive_days += 1
+        else:
+            consecutive_days = 1  # 首次或中断，重置为1
+
+        self.save_data('consecutive_days', consecutive_days)
+        self.save_data('last_success_date', today_str)
+
+        # 解析奖励积分
+        points_match = re.search(r'获得 (\d+) 积分', message)
+        points = int(points_match.group(1)) if points_match else "—"
+
+        sign_dict = {
+            "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
+            "status": sign_status,
+            "message": message,
+            "points": points,
+            "days": consecutive_days,
+        }
+
+        self._save_sign_history(sign_dict)
+        self._send_sign_notification(sign_dict)
+        return sign_dict
+
+    def _handle_sign_failure(self, state: bool, message: str,
+                              retry_count: int, extended_retry: int) -> Optional[dict]:
+        """
+        签到失败后的统一处理：重试逻辑、失败记录、通知。
+        返回 sign_dict（重试时返回 None 并递归调用 sign()）。
+        """
+        logger.error(f"影巢签到失败: {message}")
+
+        # 检测"已经签到"状态，视为成功不重试
+        if any(k in (message or "") for k in ["已经签到", "签到过", "重复签到", "今日已签", "已经签过", "明日再来"]):
+            logger.info(f"API返回消息表明今日已签到（消息: {message}），标记为'已签到'，不重试")
+            sign_dict = {
+                "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
+                "status": "已签到",
+                "message": message,
+            }
+            self._save_sign_history(sign_dict)
+            self._send_sign_notification(sign_dict)
+            return sign_dict
+
+        # 检测鉴权失败，尝试自动登录刷新 Cookie 后重试
+        if any(k in (message or "") for k in ["未配置Cookie", "缺少'token'", "未授权", "Unauthorized", "token", "csrf", "登录已过期", "过期", "expired"]):
+            logger.info("检测到Cookie或鉴权问题，尝试自动登录刷新Cookie后重试一次")
+            new_cookie = self._auto_login()
+            if new_cookie:
+                self._cookie = new_cookie
+                self._save_config()
+                logger.info("自动登录成功，使用新Cookie重试签到")
+                state2, message2 = self._signin_base()
+                if state2:
+                    return self._handle_sign_success(state2, message2)
+
+        # 常规重试逻辑
+        if retry_count < self._max_retries:
+            logger.info(f"将在{self._retry_interval}秒后进行第{retry_count+1}次常规重试...")
+            if self._notify:
+                self.post_message(
+                    mtype=NotificationType.SiteMessage,
+                    title="【影巢签到重试】",
+                    text=f"❗ 签到失败: {message}，{self._retry_interval}秒后将进行第{retry_count+1}次常规重试"
+                )
+            time.sleep(self._retry_interval)
+            return self.sign(retry_count + 1, extended_retry)
+
+        # 所有重试都失败
+        sign_dict = {
+            "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
+            "status": f"签到失败: {message}",
+            "message": message,
+        }
+        self._save_sign_history(sign_dict)
+
+        if self._notify:
+            self.post_message(
+                mtype=NotificationType.SiteMessage,
+                title="【❌ 影巢签到失败】",
+                text=f"❌ 签到失败: {message}，所有重试均已失败"
+            )
+        return sign_dict
+
 
     def _signin_base(self) -> Tuple[bool, str]:
         """
@@ -549,16 +534,10 @@ class HdhiveSignKB(_PluginBase):
           失败: {"success": false, "message": "...", "description": "...", "code": "400/500"}
         """
         try:
-            cookies = {}
-            if self._cookie:
-                for cookie_item in self._cookie.split(';'):
-                    if '=' in cookie_item:
-                        name, value = cookie_item.strip().split('=', 1)
-                        cookies[name] = value
-            else:
+            cookies, token = self._parse_cookie()
+            if token is None:
                 return False, "未配置Cookie"
 
-            token = cookies.get('token')
             csrf_token = cookies.get('csrf_access_token')
 
             if not token:
