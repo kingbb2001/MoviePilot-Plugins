@@ -65,6 +65,32 @@ class HdhiveSignKB(_PluginBase):
     plugin_config_prefix = "hdhivesignkb_"
     # 加载顺序
     plugin_order = 1
+
+    # ── 私有配置持久化 ───────────────────────────────────────────────
+    def _save_config(self, onlyonce=None):
+        """统一保存插件配置到 MoviePilot。避免每次改动都写一长串参数。
+        
+        Args:
+            onlyonce: 可选，显式传入 onlyonce 值（留 None 则不写入该字段）
+        """
+        cfg = {
+            "enabled": self._enabled,
+            "notify": self._notify,
+            "cron": self._cron,
+            "cookie": self._cookie,
+            "base_url": self._base_url,
+            "max_retries": self._max_retries,
+            "retry_interval": self._retry_interval,
+            "history_days": self._history_days,
+            "username": getattr(self, "_username", ""),
+            "password": getattr(self, "_password", ""),
+            "proxy_mode": self._proxy_mode,
+            "proxy_url": self._proxy_url,
+        }
+        if onlyonce is not None:
+            cfg["onlyonce"] = onlyonce
+        self.update_config(cfg)
+
     # 可使用的用户级别
     auth_level = 2
 
@@ -189,21 +215,7 @@ class HdhiveSignKB(_PluginBase):
                                     run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
                                     name="影巢签到")
                 self._onlyonce = False
-                self.update_config({
-                    "onlyonce": False,
-                    "enabled": self._enabled,
-                    "cookie": self._cookie,
-                    "notify": self._notify,
-                    "cron": self._cron,
-                    "base_url": self._base_url,
-                    "max_retries": self._max_retries,
-                    "retry_interval": self._retry_interval,
-                    "history_days": self._history_days,
-                    "username": getattr(self, "_username", ""),
-                    "password": getattr(self, "_password", ""),
-                    "proxy_mode": self._proxy_mode,
-                    "proxy_url": self._proxy_url
-                })
+                self._save_config(onlyonce=False)
 
                 # 启动任务
                 if self._scheduler.get_jobs():
@@ -328,20 +340,7 @@ class HdhiveSignKB(_PluginBase):
                 new_cookie = self._auto_login()
                 if new_cookie:
                     self._cookie = new_cookie
-                    self.update_config({
-                        "enabled": self._enabled,
-                        "notify": self._notify,
-                        "cron": self._cron,
-                        "cookie": self._cookie,
-                        "base_url": self._base_url,
-                        "max_retries": self._max_retries,
-                        "retry_interval": self._retry_interval,
-                        "history_days": self._history_days,
-                        "username": getattr(self, "_username", ""),
-                        "password": getattr(self, "_password", ""),
-                        "proxy_mode": self._proxy_mode,
-                        "proxy_url": self._proxy_url,
-                    })
+                    self._save_config()
                     logger.info("已通过自动登录获取新Cookie")
                 else:
                     logger.error("未配置Cookie且自动登录失败")
@@ -366,20 +365,7 @@ class HdhiveSignKB(_PluginBase):
                 ensured = self._ensure_valid_cookie()
                 if ensured:
                     self._cookie = ensured
-                    self.update_config({
-                        "enabled": self._enabled,
-                        "notify": self._notify,
-                        "cron": self._cron,
-                        "cookie": self._cookie,
-                        "base_url": self._base_url,
-                        "max_retries": self._max_retries,
-                        "retry_interval": self._retry_interval,
-                        "history_days": self._history_days,
-                        "username": getattr(self, "_username", ""),
-                        "password": getattr(self, "_password", ""),
-                        "proxy_mode": self._proxy_mode,
-                        "proxy_url": self._proxy_url,
-                    })
+                    self._save_config()
             except Exception:
                 pass
 
@@ -466,20 +452,7 @@ class HdhiveSignKB(_PluginBase):
                     new_cookie = self._auto_login()
                     if new_cookie:
                         self._cookie = new_cookie
-                        self.update_config({
-                            "enabled": self._enabled,
-                            "notify": self._notify,
-                            "cron": self._cron,
-                            "cookie": self._cookie,
-                            "base_url": self._base_url,
-                            "max_retries": self._max_retries,
-                            "retry_interval": self._retry_interval,
-                            "history_days": self._history_days,
-                            "username": getattr(self, "_username", ""),
-                            "password": getattr(self, "_password", ""),
-                            "proxy_mode": self._proxy_mode,
-                            "proxy_url": self._proxy_url,
-                        })
+                        self._save_config()
                         logger.info("自动登录成功，使用新Cookie重试签到")
                         state2, message2 = self._signin_base()
                         if state2:
