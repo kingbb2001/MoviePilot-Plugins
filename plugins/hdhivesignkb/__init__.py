@@ -1,4 +1,4 @@
-"""
+﻿"""
 影巢签到插件
 版本: 2.3.7
 作者: kingbb2001
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.3.8: 修复：1)combined_text定义未使用 2)方法内冗余import re as _re 3)init_plugin重复日志行
 - v2.3.7: 修复VAvatar组件嵌套三元表达式括号混乱导致插件加载后立即停止（从v2.3.0移植时误用了未修复的原始代码）
 - v2.3.6: 新增头像显示优化（无效URL自动降级为渐变背景字母占位符），从v2.3.0移植不含Open API依赖
 - v2.3.5: 回退到v2.2.2稳定基线代码，移除v2.3.0-v2.3.4期间添加的全部Open API相关功能（Open API为Premium专属，免费用户不可用）
@@ -55,7 +56,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.3.7"
+    plugin_version = "2.3.8"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -176,7 +177,6 @@ class HdhiveSignKB(_PluginBase):
                 self._proxy_mode = config.get("proxy_mode") or "system"
                 self._proxy_url = (config.get("proxy_url") or "").strip()
                 logger.info(f"影巢签到插件已加载，配置：enabled={self._enabled}, notify={self._notify}, cron={self._cron}, proxy_mode={self._proxy_mode}")
-                logger.info(f"影巢签到插件已加载，配置：enabled={self._enabled}, notify={self._notify}, cron={self._cron}")
             
             # 清理所有可能的延长重试任务
             self._clear_extended_retry_tasks()
@@ -653,7 +653,7 @@ class HdhiveSignKB(_PluginBase):
             # 影巢API在已签到时返回 success=false, 但 message 或 description 中包含"已签到"相关文字
             signed_keywords = ["已经签到", "签到过", "重复签到", "今日已签", "已经签过", "明日再来"]
             combined_text = f"{message} {description}".lower()
-            is_already_signed = any(kw in message or kw in description for kw in signed_keywords)
+            is_already_signed = any(kw in combined_text for kw in signed_keywords)
             
             if is_already_signed:
                 try:
@@ -761,12 +761,11 @@ class HdhiveSignKB(_PluginBase):
                     rsc_resp = requests.get(rsc_url, headers=rsc_headers, cookies=cookies, proxies=self._get_proxies(), timeout=30, verify=False)
                     logger.info(f"RSC 用户页状态码: {getattr(rsc_resp,'status_code','unknown')} CT: {getattr(rsc_resp.headers,'get',lambda k:'' )('Content-Type')}")
                     rsc_text = rsc_resp.text or ''
-                    import re as _re
-                    m_nick = _re.search(r'"nickname":"([^"]+)"', rsc_text)
-                    m_points = _re.search(r'"points":(\d+)', rsc_text)
-                    m_days = _re.search(r'"signin_days_total":(\d+)', rsc_text)
-                    m_avatar = _re.search(r'"avatar_url":"([^"]+)"', rsc_text)
-                    m_created = _re.search(r'"created_at":"([^"]+)"', rsc_text)
+                    m_nick = re.search(r'"nickname":"([^"]+)"', rsc_text)
+                    m_points = re.search(r'"points":(\d+)', rsc_text)
+                    m_days = re.search(r'"signin_days_total":(\d+)', rsc_text)
+                    m_avatar = re.search(r'"avatar_url":"([^"]+)"', rsc_text)
+                    m_created = re.search(r'"created_at":"([^"]+)"', rsc_text)
                     if m_nick:
                         info['nickname'] = m_nick.group(1)
                     if m_points:
