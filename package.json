@@ -9,6 +9,7 @@
     "level": 1,
     "v2": true,
     "history": {
+      "v2.3.8": "修复代码质量问题：1)combined_text定义未使用 2)方法内冗余import re as _re 3)init_plugin重复日志行",
       "v2.3.7": "修复VAvatar组件嵌套三元表达式括号混乱导致插件加载后立即崩溃（移植时误用v2.3.0未修复原始代码）",
       "v2.3.6": "新增头像显示优化（无效URL自动降级为渐变背景字母占位符），从v2.3.0移植不含Open API依赖",
       "v2.3.5": "回退到v2.2.2稳定基线代码，移除v2.3.0-v2.3.4期间添加的全部Open API相关功能（Open API为Premium专属不可用）",
@@ -30,8 +31,7 @@
       "v1.3.0": "用户信息卡片美化；通知追加用户摘要；重复签到与执行前预拉取用户信息；RSC解析兜底",
       "v1.2.0": "自动登录刷新Cookie：cloudscraper与Playwright兜底；修复重复失败记录；默认域名更新为 hdhive.com",
       "v1.1.0": "域名改为可配置；统一API拼接(Referer/Origin/接口)，精简日志",
-      "v1.0": "首次发布",
-      "v2.3.8": "修复代码质量问题：1)combined_text定义未使用 2)方法内冗余import re as _re 3)init_plugin重复日志行"
+      "v1.0": "首次发布"
     }
   }
 }
