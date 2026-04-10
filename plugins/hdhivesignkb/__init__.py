@@ -1,6 +1,6 @@
 ﻿"""
 影巢签到插件
-版本: 2.3.8
+版本: 2.3.9
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.3.9: 重构：提取_save_config统一配置持久化，替换3处重复update_config调用
 - v2.3.8: 修复：1)combined_text定义未使用 2)方法内冗余import re as _re 3)init_plugin重复日志行
 - v2.3.7: 修复VAvatar组件嵌套三元表达式括号混乱导致插件加载后立即停止（从v2.3.0移植时误用了未修复的原始代码）
 - v2.3.6: 新增头像显示优化（无效URL自动降级为渐变背景字母占位符），从v2.3.0移植不含Open API依赖
@@ -56,7 +57,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.3.8"
+    plugin_version = "2.3.9"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
