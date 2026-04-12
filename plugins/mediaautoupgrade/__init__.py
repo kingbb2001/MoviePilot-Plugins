@@ -124,14 +124,53 @@ class MediaAutoUpgrade(_PluginBase):
     def _load_emby_from_settings(self):
         """从MoviePilot设置加载Emby配置"""
         try:
-            if hasattr(settings, 'EMBY_HOST') and settings.EMBY_HOST:
-                self._emby_host = settings.EMBY_HOST
-                logger.info(f"从MP设置加载Emby地址: {self._emby_host}")
-            if hasattr(settings, 'EMBY_API_KEY') and settings.EMBY_API_KEY:
-                self._emby_api_key = settings.EMBY_API_KEY
-                logger.info("从MP设置加载Emby API Key")
+            # 尝试多种可能的配置字段名
+            host_fields = ['EMBY_HOST', 'EMBY_SERVER', 'emby_host', 'emby_server']
+            apikey_fields = ['EMBY_API_KEY', 'EMBY_TOKEN', 'emby_api_key', 'emby_token']
+            
+            for field in host_fields:
+                if hasattr(settings, field):
+                    value = getattr(settings, field)
+                    if value:
+                        self._emby_host = value
+                        logger.info(f"从MP设置加载Emby地址: {self._emby_host}")
+                        break
+            
+            for field in apikey_fields:
+                if hasattr(settings, field):
+                    value = getattr(settings, field)
+                    if value:
+                        self._emby_api_key = value
+                        logger.info(f"从MP设置加载Emby API Key (字段: {field})")
+                        break
+                        
+            # 如果还是没找到，尝试从 modules 获取
+            if not self._emby_host or not self._emby_api_key:
+                self._load_emby_from_modules()
+                
         except Exception as e:
             logger.error(f"加载Emby配置失败: {str(e)}")
+    
+    def _load_emby_from_modules(self):
+        """尝试从MP模块获取Emby配置"""
+        try:
+            # 尝试导入 MediaServerModule 获取配置
+            from app.modules.mediaserver import MediaServerModule
+            module = MediaServerModule()
+            
+            # 获取所有媒体服务器
+            servers = module.get_services()
+            if servers:
+                for server in servers:
+                    if hasattr(server, 'get_type') and server.get_type() == 'emby':
+                        if hasattr(server, 'get_host'):
+                            self._emby_host = server.get_host()
+                        if hasattr(server, 'get_api_key'):
+                            self._emby_api_key = server.get_api_key()
+                        logger.info(f"从MediaServerModule加载Emby配置成功")
+                        break
+        except Exception as e:
+            logger.debug(f"从MediaServerModule加载Emby配置失败: {str(e)}")
     
     def get_state(self) -> bool:
         """获取插件状态"""
