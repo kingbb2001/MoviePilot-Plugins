@@ -2,10 +2,11 @@
 MediaAutoUpgrade Plugin for MoviePilot
 自动检测媒体库视频质量，支持展示质量报告并提交洗板订阅
 
-版本: 1.2.1
+版本: 1.2.2
 作者: wj180
 
 更新记录:
+- v1.2.2: 修复Emby服务器列表获取逻辑，增强兼容性
 - v1.2.1: 修复API路由注册错误，将desc改为description
 - v1.2.0: 支持从MP媒体服务器配置中选择Emby服务器，无需手动填写API信息
 - v1.1.0: 优化扫描逻辑：分批获取(每批500个)、结果持久化到JSON文件、支持断点续扫
@@ -44,7 +45,7 @@ class MediaAutoUpgrade(_PluginBase):
     plugin_name = "MediaAutoUpgrade"
     plugin_desc = "自动检测媒体库视频质量，支持展示质量报告并提交洗板订阅"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/mediaautoupgrade.png"
-    plugin_version = "1.2.1"
+    plugin_version = "1.2.2"
     plugin_author = "kingbb2001"
     author_url = "https://github.com/kingbb2001"
     plugin_config_prefix = "mediaautoupgrade_"
@@ -210,19 +211,52 @@ class MediaAutoUpgrade(_PluginBase):
             
             # 获取所有媒体服务器
             all_servers = module.get_services()
+            logger.info(f"MediaServerModule.get_services() 返回: {all_servers}")
+            
             if all_servers:
-                for server in all_servers:
-                    if hasattr(server, 'get_type') and server.get_type() == 'emby':
-                        name = getattr(server, '_name', None) or getattr(server, 'name', None) or 'Unknown'
+                for name, server in all_servers.items() if isinstance(all_servers, dict) else enumerate(all_servers):
+                    logger.info(f"检查服务器: name={name}, server={server}, type={type(server)}")
+                    
+                    # 尝试多种方式获取服务器类型
+                    server_type = None
+                    if hasattr(server, 'get_type'):
+                        server_type = server.get_type()
+                    elif hasattr(server, '_type'):
+                        server_type = server._type
+                    elif hasattr(server, 'type'):
+                        server_type = server.type
+                    
+                    logger.info(f"服务器类型: {server_type}")
+                    
+                    if server_type and server_type.lower() == 'emby':
+                        # 获取服务器名称
+                        srv_name = None
+                        if hasattr(server, '_name'):
+                            srv_name = server._name
+                        elif hasattr(server, 'name'):
+                            srv_name = server.name
+                        elif hasattr(server, 'get_name'):
+                            srv_name = server.get_name()
+                        
+                        # 获取服务器地址
                         host = ''
                         if hasattr(server, 'get_host'):
                             host = server.get_host()
-                        servers.append({
-                            'name': name,
-                            'host': host
-                        })
+                        elif hasattr(server, '_host'):
+                            host = server._host
+                        elif hasattr(server, 'host'):
+                            host = server.host
+                        
+                        if srv_name:
+                            servers.append({
+                                'name': srv_name,
+                                'host': host
+                            })
+                            logger.info(f"找到Emby服务器: {srv_name} ({host})")
+            else:
+                logger.warning("MediaServerModule.get_services() 返回为空")
         except Exception as e:
-            logger.debug(f"获取Emby服务器列表失败: {str(e)}")
+            logger.error(f"获取Emby服务器列表失败: {str(e)}", exc_info=True)
         return servers
     
     def _get_emby_server_options(self) -> List[Dict[str, str]]:
@@ -239,6 +273,15 @@ class MediaAutoUpgrade(_PluginBase):
                     'title': title,
                     'value': name
                 })
+        
+        # 如果没有找到服务器，添加提示选项
+        if not options:
+            options.append({
+                'title': '未找到Emby服务器，请先在MP设置中配置',
+                'value': ''
+            })
+        
+        logger.info(f"Emby服务器选项: {options}")
         return options
     
     def get_state(self) -> bool:
