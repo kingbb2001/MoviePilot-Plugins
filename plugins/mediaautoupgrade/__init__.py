@@ -1088,7 +1088,8 @@ window.addEventListener("DOMContentLoaded", () => {
         self._scan_results = []
         
         try:
-            logger.info("开始扫描媒体质量...")
+            logger.info("[MediaAutoUpgrade] 开始扫描媒体质量...")
+            logger.info(f"[MediaAutoUpgrade] Emby配置: host={self._emby_host}, api_key={'***' if self._emby_api_key else '未设置'}")
             
             # 获取Emby媒体库
             libraries = self._get_emby_libraries()
@@ -1170,13 +1171,17 @@ window.addEventListener("DOMContentLoaded", () => {
         try:
             url = urljoin(self._emby_host, "/emby/Library/SelectableMediaFolders")
             headers = {"X-Emby-Token": self._emby_api_key}
+            logger.info(f"[MediaAutoUpgrade] 获取媒体库列表: {url}")
             
             res = RequestUtils(headers=headers).get_res(url)
             if res and res.status_code == 200:
-                return res.json()
+                libs = res.json()
+                logger.info(f"[MediaAutoUpgrade] 找到 {len(libs)} 个媒体库: {[l.get('Name') for l in libs]}")
+                return libs
+            logger.warning(f"[MediaAutoUpgrade] 获取媒体库失败: status={res.status_code if res else 'None'}")
             return []
         except Exception as e:
-            logger.error(f"获取Emby媒体库失败: {str(e)}")
+            logger.error(f"[MediaAutoUpgrade] 获取Emby媒体库失败: {str(e)}")
             return []
     
     def _get_library_items(self, library_id: str) -> List[dict]:
@@ -1186,12 +1191,12 @@ window.addEventListener("DOMContentLoaded", () => {
     def _get_library_items_batch(self, library_id: str, start_index: int = 0, limit: int = 500) -> List[dict]:
         """分批获取媒体库项目"""
         try:
-            url = urljoin(self._emby_host, f"/emby/Items")
+            url = urljoin(self._emby_host, "/emby/Items")
             params = {
                 "ParentId": library_id,
                 "Recursive": "true",
-                "IncludeItemTypes": "Movie,Episode",
-                "Fields": "MediaSources,Path,Overview",
+                "IncludeItemTypes": "Movie,Episode,Video",
+                "Fields": "MediaSources,MediaStreams,Path,Overview,ProductionYear",
                 "StartIndex": start_index,
                 "Limit": limit
             }
@@ -1200,10 +1205,13 @@ window.addEventListener("DOMContentLoaded", () => {
             res = RequestUtils(headers=headers).get_res(url, params=params)
             if res and res.status_code == 200:
                 data = res.json()
-                return data.get('Items', [])
+                items = data.get('Items', [])
+                logger.info(f"[MediaAutoUpgrade] 从索引 {start_index} 获取到 {len(items)} 个媒体")
+                return items
+            logger.warning(f"[MediaAutoUpgrade] 获取媒体失败: status={res.status_code if res else 'None'}")
             return []
         except Exception as e:
-            logger.error(f"获取媒体库项目失败: {str(e)}")
+            logger.error(f"[MediaAutoUpgrade] 获取媒体库项目失败: {str(e)}")
             return []
     
     def _analyze_media_quality(self, media: dict) -> dict:
@@ -1212,6 +1220,7 @@ window.addEventListener("DOMContentLoaded", () => {
         name = media.get('Name', 'Unknown')
         year = media.get('ProductionYear', '')
         type_ = 'movie' if media.get('Type') == 'Movie' else 'tv'
+        logger.info(f"[MediaAutoUpgrade] 检测媒体: {name} ({year}) type={type_}")
         
         # 获取媒体源信息
         media_sources = media.get('MediaSources', [])
@@ -1251,6 +1260,12 @@ window.addEventListener("DOMContentLoaded", () => {
         
         # 判断是否达标
         status = 'good' if quality_score >= 60 else 'below_standard'
+        status_text = "✅ 达标" if status == 'good' else "❌ 不达标"
+        
+        # 详细日志
+        logger.info(f"[MediaAutoUpgrade] [{status_text}] {name}: "
+                    f"分辨率={resolution} 视频={video_codec} 音频={audio_codec.upper()} {audio_channels}ch "
+                    f"码率={bitrate}kbps 评分={quality_score}")
         
         # 获取海报URL
         poster_url = f"{self._emby_host}/emby/Items/{media_id}/Images/Primary?api_key={self._emby_api_key}"
