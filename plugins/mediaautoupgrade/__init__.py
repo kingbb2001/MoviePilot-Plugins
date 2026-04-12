@@ -2,10 +2,11 @@
 MediaAutoUpgrade Plugin for MoviePilot
 自动检测媒体库视频质量，支持展示质量报告并提交洗板订阅
 
-版本: 1.2.0
+版本: 1.2.1
 作者: wj180
 
 更新记录:
+- v1.2.1: 修复API路由注册错误，将desc改为description
 - v1.2.0: 支持从MP媒体服务器配置中选择Emby服务器，无需手动填写API信息
 - v1.1.0: 优化扫描逻辑：分批获取(每批500个)、结果持久化到JSON文件、支持断点续扫
 - v1.0.0: 初始版本，支持Emby媒体质量检测、质量报告展示、手动/自动洗板订阅
@@ -43,7 +44,7 @@ class MediaAutoUpgrade(_PluginBase):
     plugin_name = "MediaAutoUpgrade"
     plugin_desc = "自动检测媒体库视频质量，支持展示质量报告并提交洗板订阅"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/mediaautoupgrade.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "kingbb2001"
     author_url = "https://github.com/kingbb2001"
     plugin_config_prefix = "mediaautoupgrade_"
@@ -271,31 +272,31 @@ class MediaAutoUpgrade(_PluginBase):
                 "path": "/mediaautoupgrade/scan",
                 "endpoint": self._api_scan,
                 "methods": ["POST"],
-                "desc": "开始质量扫描"
+                "description": "开始质量扫描"
             },
             {
                 "path": "/mediaautoupgrade/status",
                 "endpoint": self._api_status,
                 "methods": ["GET"],
-                "desc": "获取扫描状态"
+                "description": "获取扫描状态"
             },
             {
                 "path": "/mediaautoupgrade/results",
                 "endpoint": self._api_results,
                 "methods": ["GET"],
-                "desc": "获取扫描结果"
+                "description": "获取扫描结果"
             },
             {
                 "path": "/mediaautoupgrade/upgrade",
                 "endpoint": self._api_upgrade,
                 "methods": ["POST"],
-                "desc": "提交洗板订阅"
+                "description": "提交洗板订阅"
             },
             {
                 "path": "/mediaautoupgrade/rules",
                 "endpoint": self._api_rules,
                 "methods": ["GET", "POST"],
-                "desc": "获取/更新质量规则"
+                "description": "获取/更新质量规则"
             }
         ]
     
