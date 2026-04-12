@@ -2,10 +2,11 @@
 MediaAutoUpgrade Plugin for MoviePilot
 自动检测媒体库视频质量，支持展示质量报告并提交洗板订阅
 
-版本: 1.1.0
+版本: 1.2.0
 作者: wj180
 
 更新记录:
+- v1.2.0: 支持从MP媒体服务器配置中选择Emby服务器，无需手动填写API信息
 - v1.1.0: 优化扫描逻辑：分批获取(每批500个)、结果持久化到JSON文件、支持断点续扫
 - v1.0.0: 初始版本，支持Emby媒体质量检测、质量报告展示、手动/自动洗板订阅
 """
@@ -42,7 +43,7 @@ class MediaAutoUpgrade(_PluginBase):
     plugin_name = "MediaAutoUpgrade"
     plugin_desc = "自动检测媒体库视频质量，支持展示质量报告并提交洗板订阅"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/mediaautoupgrade.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "kingbb2001"
     author_url = "https://github.com/kingbb2001"
     plugin_config_prefix = "mediaautoupgrade_"
@@ -54,6 +55,7 @@ class MediaAutoUpgrade(_PluginBase):
     _cron = None
     _emby_host = None
     _emby_api_key = None
+    _emby_server_name = None  # 选择的Emby服务器名称
     _quality_rules = None
     _auto_upgrade = False
     _notify = False
@@ -80,15 +82,16 @@ class MediaAutoUpgrade(_PluginBase):
             self._enabled = config.get("enabled", False)
             self._onlyonce = config.get("onlyonce", False)
             self._cron = config.get("cron", "0 2 * * *")
+            self._emby_server_name = config.get("emby_server_name", "")
             self._emby_host = config.get("emby_host", "")
             self._emby_api_key = config.get("emby_api_key", "")
             self._quality_rules = config.get("quality_rules", self._default_quality_rules())
             self._auto_upgrade = config.get("auto_upgrade", False)
             self._notify = config.get("notify", True)
             
-        # 如果Emby配置为空，尝试从MP配置获取
-        if not self._emby_host or not self._emby_api_key:
-            self._load_emby_from_settings()
+        # 如果选择了服务器名称，从MP获取对应配置
+        if self._emby_server_name and (not self._emby_host or not self._emby_api_key):
+            self._load_emby_by_name(self._emby_server_name)
         
         # 加载持久化的扫描结果
         self._load_scan_results()
@@ -171,6 +174,71 @@ class MediaAutoUpgrade(_PluginBase):
                         break
         except Exception as e:
             logger.debug(f"从MediaServerModule加载Emby配置失败: {str(e)}")
+    
+    def _load_emby_by_name(self, server_name: str):
+        """根据服务器名称加载Emby配置"""
+        try:
+            from app.modules.mediaserver import MediaServerModule
+            module = MediaServerModule()
+            
+            # 获取所有媒体服务器
+            servers = module.get_services()
+            if servers:
+                for server in servers:
+                    if hasattr(server, 'get_type') and server.get_type() == 'emby':
+                        # 检查服务器名称是否匹配
+                        name = getattr(server, '_name', None) or getattr(server, 'name', None)
+                        if name == server_name:
+                            if hasattr(server, 'get_host'):
+                                self._emby_host = server.get_host()
+                            if hasattr(server, 'get_api_key'):
+                                self._emby_api_key = server.get_api_key()
+                            logger.info(f"已选择Emby服务器: {server_name}")
+                            return True
+            return False
+        except Exception as e:
+            logger.error(f"加载指定Emby服务器失败: {str(e)}")
+            return False
+    
+    def _get_available_emby_servers(self) -> List[Dict[str, str]]:
+        """获取所有可用的Emby服务器列表"""
+        servers = []
+        try:
+            from app.modules.mediaserver import MediaServerModule
+            module = MediaServerModule()
+            
+            # 获取所有媒体服务器
+            all_servers = module.get_services()
+            if all_servers:
+                for server in all_servers:
+                    if hasattr(server, 'get_type') and server.get_type() == 'emby':
+                        name = getattr(server, '_name', None) or getattr(server, 'name', None) or 'Unknown'
+                        host = ''
+                        if hasattr(server, 'get_host'):
+                            host = server.get_host()
+                        servers.append({
+                            'name': name,
+                            'host': host
+                        })
+        except Exception as e:
+            logger.debug(f"获取Emby服务器列表失败: {str(e)}")
+        return servers
+    
+    def _get_emby_server_options(self) -> List[Dict[str, str]]:
+        """获取Emby服务器选项（用于VSelect）"""
+        servers = self._get_available_emby_servers()
+        options = []
+        for server in servers:
+            name = server.get('name', '')
+            host = server.get('host', '')
+            if name:
+                # 显示名称和地址
+                title = f"{name} ({host})" if host else name
+                options.append({
+                    'title': title,
+                    'value': name
+                })
+        return options
     
     def get_state(self) -> bool:
         """获取插件状态"""
@@ -289,12 +357,14 @@ class MediaAutoUpgrade(_PluginBase):
                                 'props': {'cols': 12, 'md': 6},
                                 'content': [
                                     {
-                                        'component': 'VTextField',
+                                        'component': 'VSelect',
                                         'props': {
-                                            'model': 'emby_host',
-                                            'label': 'Emby地址',
-                                            'placeholder': 'http://127.0.0.1:8096',
-                                            'hint': '留空则使用MP配置的Emby地址'
+                                            'model': 'emby_server_name',
+                                            'label': '选择Emby服务器',
+                                            'placeholder': '选择MP中已配置的Emby服务器',
+                                            'hint': '优先从MP媒体服务器配置中选择',
+                                            'items': self._get_emby_server_options(),
+                                            'clearable': True
                                         }
                                     }
                                 ]
@@ -306,10 +376,10 @@ class MediaAutoUpgrade(_PluginBase):
                                     {
                                         'component': 'VTextField',
                                         'props': {
-                                            'model': 'emby_api_key',
-                                            'label': 'Emby API Key',
-                                            'placeholder': '留空则使用MP配置的API Key',
-                                            'type': 'password'
+                                            'model': 'cron',
+                                            'label': '定时扫描',
+                                            'placeholder': '0 2 * * *',
+                                            'hint': 'Cron表达式，留空则不自动扫描'
                                         }
                                     }
                                 ]
@@ -326,10 +396,10 @@ class MediaAutoUpgrade(_PluginBase):
                                     {
                                         'component': 'VTextField',
                                         'props': {
-                                            'model': 'cron',
-                                            'label': '定时任务',
-                                            'placeholder': '0 2 * * *',
-                                            'hint': 'Cron表达式，默认每天凌晨2点执行'
+                                            'model': 'emby_host',
+                                            'label': 'Emby地址(手动)',
+                                            'placeholder': 'http://127.0.0.1:8096',
+                                            'hint': '如未从上方选择，可手动填写'
                                         }
                                     }
                                 ]
@@ -337,6 +407,27 @@ class MediaAutoUpgrade(_PluginBase):
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'emby_api_key',
+                                            'label': 'Emby API Key(手动)',
+                                            'placeholder': '从Emby控制台获取',
+                                            'hint': '如未从上方选择，可手动填写',
+                                            'type': 'password'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12},
                                 'content': [
                                     {
                                         'component': 'VBtn',
