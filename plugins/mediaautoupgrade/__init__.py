@@ -42,10 +42,10 @@ class MediaAutoUpgrade(_PluginBase):
     # 插件信息
     plugin_name = "MediaAutoUpgrade"
     plugin_desc = "自动检测媒体库视频质量，支持展示质量报告并提交洗板订阅"
-    plugin_icon = "https://raw.githubusercontent.com/wj180/MoviePilot-MediaAutoUpgrade-Plugin/main/icons/mediaautoupgrade.png"
+    plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/mediaautoupgrade.png"
     plugin_version = "1.1.0"
-    plugin_author = "wj180"
-    author_url = "https://github.com/wj180"
+    plugin_author = "kingbb2001"
+    author_url = "https://github.com/kingbb2001"
     plugin_config_prefix = "mediaautoupgrade_"
     plugin_order = 25
     
