@@ -2,10 +2,11 @@
 MediaAutoUpgrade Plugin for MoviePilot
 自动检测媒体库视频质量，支持展示质量报告并提交洗板订阅
 
-版本: 1.2.2
+版本: 1.2.3
 作者: wj180
 
 更新记录:
+- v1.2.3: 改用MediaServerHelper获取Emby服务器，与MP官方方式一致
 - v1.2.2: 修复Emby服务器列表获取逻辑，增强兼容性
 - v1.2.1: 修复API路由注册错误，将desc改为description
 - v1.2.0: 支持从MP媒体服务器配置中选择Emby服务器，无需手动填写API信息
@@ -25,6 +26,7 @@ from urllib.parse import urljoin
 from app.core.config import settings
 from app.core.event import eventmanager, Event
 from app.core.metainfo import MetaInfo
+from app.helper.mediaserver import MediaServerHelper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType
@@ -45,7 +47,7 @@ class MediaAutoUpgrade(_PluginBase):
     plugin_name = "MediaAutoUpgrade"
     plugin_desc = "自动检测媒体库视频质量，支持展示质量报告并提交洗板订阅"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/mediaautoupgrade.png"
-    plugin_version = "1.2.2"
+    plugin_version = "1.2.3"
     plugin_author = "kingbb2001"
     author_url = "https://github.com/kingbb2001"
     plugin_config_prefix = "mediaautoupgrade_"
@@ -157,106 +159,140 @@ class MediaAutoUpgrade(_PluginBase):
             logger.error(f"加载Emby配置失败: {str(e)}")
     
     def _load_emby_from_modules(self):
-        """尝试从MP模块获取Emby配置"""
+        """尝试从MediaServerHelper获取Emby配置"""
         try:
-            # 尝试导入 MediaServerModule 获取配置
-            from app.modules.mediaserver import MediaServerModule
-            module = MediaServerModule()
+            mediaserver_helper = MediaServerHelper()
             
-            # 获取所有媒体服务器
-            servers = module.get_services()
-            if servers:
-                for server in servers:
-                    if hasattr(server, 'get_type') and server.get_type() == 'emby':
-                        if hasattr(server, 'get_host'):
-                            self._emby_host = server.get_host()
-                        if hasattr(server, 'get_api_key'):
-                            self._emby_api_key = server.get_api_key()
-                        logger.info(f"从MediaServerModule加载Emby配置成功")
-                        break
+            # 获取所有 Emby 服务器
+            emby_servers = mediaserver_helper.get_services(type_filter="emby")
+            
+            if emby_servers:
+                # 取第一个服务器
+                name, emby_server = next(iter(emby_servers.items()))
+                
+                # 获取配置
+                config = getattr(emby_server, 'config', None)
+                if config and hasattr(config, 'config'):
+                    srv_config = config.config or {}
+                elif hasattr(emby_server, 'config'):
+                    srv_config = emby_server.config or {}
+                else:
+                    srv_config = {}
+                
+                # 获取 host 和 apikey
+                if isinstance(srv_config, dict):
+                    self._emby_host = srv_config.get('host', '')
+                    self._emby_api_key = srv_config.get('apikey', '')
+                elif hasattr(srv_config, 'get'):
+                    self._emby_host = srv_config.get('host', '')
+                    self._emby_api_key = srv_config.get('apikey', '')
+                
+                # 确保 host 格式正确
+                if self._emby_host and not self._emby_host.endswith('/'):
+                    self._emby_host = self._emby_host + '/'
+                if self._emby_host and not self._emby_host.startswith('http'):
+                    self._emby_host = 'http://' + self._emby_host
+                
+                logger.info(f"从MediaServerHelper加载Emby配置成功: {name}")
         except Exception as e:
-            logger.debug(f"从MediaServerModule加载Emby配置失败: {str(e)}")
+            logger.debug(f"从MediaServerHelper加载Emby配置失败: {str(e)}")
     
     def _load_emby_by_name(self, server_name: str):
         """根据服务器名称加载Emby配置"""
         try:
-            from app.modules.mediaserver import MediaServerModule
-            module = MediaServerModule()
+            mediaserver_helper = MediaServerHelper()
             
-            # 获取所有媒体服务器
-            servers = module.get_services()
-            if servers:
-                for server in servers:
-                    if hasattr(server, 'get_type') and server.get_type() == 'emby':
-                        # 检查服务器名称是否匹配
-                        name = getattr(server, '_name', None) or getattr(server, 'name', None)
-                        if name == server_name:
-                            if hasattr(server, 'get_host'):
-                                self._emby_host = server.get_host()
-                            if hasattr(server, 'get_api_key'):
-                                self._emby_api_key = server.get_api_key()
-                            logger.info(f"已选择Emby服务器: {server_name}")
-                            return True
+            # 使用 name_filters 筛选指定服务器
+            emby_servers = mediaserver_helper.get_services(
+                name_filters=[server_name], type_filter="emby"
+            )
+            
+            if emby_servers and server_name in emby_servers:
+                emby_server = emby_servers[server_name]
+                
+                # 获取配置
+                config = getattr(emby_server, 'config', None)
+                if config and hasattr(config, 'config'):
+                    srv_config = config.config or {}
+                elif hasattr(emby_server, 'config'):
+                    srv_config = emby_server.config or {}
+                else:
+                    srv_config = {}
+                
+                # 获取 host 和 apikey
+                if isinstance(srv_config, dict):
+                    self._emby_host = srv_config.get('host', '')
+                    self._emby_api_key = srv_config.get('apikey', '')
+                elif hasattr(srv_config, 'get'):
+                    self._emby_host = srv_config.get('host', '')
+                    self._emby_api_key = srv_config.get('apikey', '')
+                
+                # 确保 host 格式正确
+                if self._emby_host and not self._emby_host.endswith('/'):
+                    self._emby_host = self._emby_host + '/'
+                if self._emby_host and not self._emby_host.startswith('http'):
+                    self._emby_host = 'http://' + self._emby_host
+                
+                logger.info(f"已选择Emby服务器: {server_name}, host={self._emby_host}")
+                return True
+            
             return False
         except Exception as e:
-            logger.error(f"加载指定Emby服务器失败: {str(e)}")
+            logger.error(f"加载指定Emby服务器失败: {str(e)}", exc_info=True)
             return False
     
     def _get_available_emby_servers(self) -> List[Dict[str, str]]:
         """获取所有可用的Emby服务器列表"""
         servers = []
         try:
-            from app.modules.mediaserver import MediaServerModule
-            module = MediaServerModule()
+            mediaserver_helper = MediaServerHelper()
             
-            # 获取所有媒体服务器
-            all_servers = module.get_services()
-            logger.info(f"MediaServerModule.get_services() 返回: {all_servers}")
+            # 使用 MediaServerHelper 获取所有 Emby 服务器
+            emby_servers = mediaserver_helper.get_services(type_filter="emby")
+            logger.info(f"MediaServerHelper.get_services(type_filter='emby') 返回: {emby_servers}")
             
-            if all_servers:
-                for name, server in all_servers.items() if isinstance(all_servers, dict) else enumerate(all_servers):
-                    logger.info(f"检查服务器: name={name}, server={server}, type={type(server)}")
+            if emby_servers:
+                for name, emby_server in emby_servers.items():
+                    logger.info(f"检查 Emby 服务器: name={name}, emby_server={emby_server}, type={type(emby_server)}")
                     
-                    # 尝试多种方式获取服务器类型
-                    server_type = None
-                    if hasattr(server, 'get_type'):
-                        server_type = server.get_type()
-                    elif hasattr(server, '_type'):
-                        server_type = server._type
-                    elif hasattr(server, 'type'):
-                        server_type = server.type
+                    # 获取配置
+                    config = getattr(emby_server, 'config', None)
+                    if config and hasattr(config, 'config'):
+                        srv_config = config.config or {}
+                    elif hasattr(emby_server, 'config'):
+                        srv_config = emby_server.config or {}
+                    else:
+                        srv_config = {}
                     
-                    logger.info(f"服务器类型: {server_type}")
+                    # 获取服务器信息
+                    srv_name = name
+                    host = ''
+                    apikey = ''
                     
-                    if server_type and server_type.lower() == 'emby':
-                        # 获取服务器名称
-                        srv_name = None
-                        if hasattr(server, '_name'):
-                            srv_name = server._name
-                        elif hasattr(server, 'name'):
-                            srv_name = server.name
-                        elif hasattr(server, 'get_name'):
-                            srv_name = server.get_name()
-                        
-                        # 获取服务器地址
-                        host = ''
-                        if hasattr(server, 'get_host'):
-                            host = server.get_host()
-                        elif hasattr(server, '_host'):
-                            host = server._host
-                        elif hasattr(server, 'host'):
-                            host = server.host
-                        
-                        if srv_name:
-                            servers.append({
-                                'name': srv_name,
-                                'host': host
-                            })
-                            logger.info(f"找到Emby服务器: {srv_name} ({host})")
+                    if isinstance(srv_config, dict):
+                        host = srv_config.get('host', '')
+                        apikey = srv_config.get('apikey', '')
+                    elif hasattr(srv_config, 'get'):
+                        host = srv_config.get('host', '')
+                        apikey = srv_config.get('apikey', '')
+                    
+                    # 确保 host 格式正确
+                    if host and not host.endswith('/'):
+                        host = host + '/'
+                    if host and not host.startswith('http'):
+                        host = 'http://' + host
+                    
+                    if srv_name:
+                        servers.append({
+                            'name': srv_name,
+                            'host': host,
+                            'apikey': apikey
+                        })
+                        logger.info(f"找到 Emby 服务器: {srv_name} ({host})")
             else:
-                logger.warning("MediaServerModule.get_services() 返回为空")
+                logger.warning("MediaServerHelper.get_services() 返回为空，没有找到 Emby 服务器")
         except Exception as e:
-            logger.error(f"获取Emby服务器列表失败: {str(e)}", exc_info=True)
+            logger.error(f"获取 Emby 服务器列表失败: {str(e)}", exc_info=True)
         return servers
     
     def _get_emby_server_options(self) -> List[Dict[str, str]]:
