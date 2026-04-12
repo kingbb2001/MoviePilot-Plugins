@@ -2,10 +2,11 @@
 MediaAutoUpgrade Plugin for MoviePilot
 自动检测媒体库视频质量，支持展示质量报告并提交洗板订阅
 
-版本: 1.2.3
-作者: wj180
+版本: 1.2.4
+作者: kingbb2001
 
 更新记录:
+- v1.2.4: 修复前端页面缺少JavaScript脚本导致扫描按钮无响应的问题；添加Emby配置加载日志；配置加载后保存到MP
 - v1.2.3: 改用MediaServerHelper获取Emby服务器，与MP官方方式一致
 - v1.2.2: 修复Emby服务器列表获取逻辑，增强兼容性
 - v1.2.1: 修复API路由注册错误，将desc改为description
@@ -47,7 +48,7 @@ class MediaAutoUpgrade(_PluginBase):
     plugin_name = "MediaAutoUpgrade"
     plugin_desc = "自动检测媒体库视频质量，支持展示质量报告并提交洗板订阅"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/mediaautoupgrade.png"
-    plugin_version = "1.2.3"
+    plugin_version = "1.2.4"
     plugin_author = "kingbb2001"
     author_url = "https://github.com/kingbb2001"
     plugin_config_prefix = "mediaautoupgrade_"
@@ -95,7 +96,14 @@ class MediaAutoUpgrade(_PluginBase):
             
         # 如果选择了服务器名称，从MP获取对应配置
         if self._emby_server_name and (not self._emby_host or not self._emby_api_key):
-            self._load_emby_by_name(self._emby_server_name)
+            if self._load_emby_by_name(self._emby_server_name):
+                # 保存加载的配置
+                self.update_config({
+                    "emby_host": self._emby_host,
+                    "emby_api_key": self._emby_api_key
+                })
+        
+        logger.info(f"Emby配置: host={self._emby_host}, api_key={'***' if self._emby_api_key else '未设置'}")
         
         # 加载持久化的扫描结果
         self._load_scan_results()
@@ -548,6 +556,7 @@ class MediaAutoUpgrade(_PluginBase):
             "enabled": self._enabled,
             "auto_upgrade": self._auto_upgrade,
             "notify": self._notify,
+            "emby_server_name": self._emby_server_name or "",
             "emby_host": self._emby_host,
             "emby_api_key": self._emby_api_key,
             "cron": self._cron,
@@ -558,36 +567,124 @@ class MediaAutoUpgrade(_PluginBase):
         """构建插件页面（质量报告展示）"""
         return [
             {
+                'component': 'div',
+                'props': {'class': 'mb-4'},
+                'text': '媒体质量报告'
+            },
+            {
                 'component': 'VRow',
                 'content': [
                     {
                         'component': 'VCol',
-                        'props': {'cols': 12},
+                        'props': {'cols': 12, 'md': 3},
                         'content': [
                             {
                                 'component': 'VCard',
                                 'props': {'variant': 'outlined'},
                                 'content': [
                                     {
-                                        'component': 'VCardTitle',
-                                        'text': '媒体质量报告'
-                                    },
+                                        'component': 'VCardText',
+                                        'content': [
+                                            {
+                                                'component': 'div',
+                                                'props': {'class': 'text-h6 text-center'},
+                                                'text': '{{scanned_count}}'
+                                            },
+                                            {
+                                                'component': 'div',
+                                                'props': {'class': 'text-caption text-center'},
+                                                'text': '已扫描'
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12, 'md': 3},
+                        'content': [
+                            {
+                                'component': 'VCard',
+                                'props': {'variant': 'outlined'},
+                                'content': [
                                     {
                                         'component': 'VCardText',
                                         'content': [
                                             {
-                                                'component': 'VProgressLinear',
-                                                'props': {
-                                                    'model': 'scan_progress',
-                                                    'color': 'primary',
-                                                    'height': '20',
-                                                    'striped': True
-                                                }
+                                                'component': 'div',
+                                                'props': {'class': 'text-h6 text-center text-success'},
+                                                'text': '{{good_count}}'
                                             },
                                             {
                                                 'component': 'div',
-                                                'props': {'class': 'mt-4'},
-                                                'text': '扫描进度: {{scan_progress}}% ({{scanned_count}}/{{total_count}})'
+                                                'props': {'class': 'text-caption text-center'},
+                                                'text': '达标'
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12, 'md': 3},
+                        'content': [
+                            {
+                                'component': 'VCard',
+                                'props': {'variant': 'outlined'},
+                                'content': [
+                                    {
+                                        'component': 'VCardText',
+                                        'content': [
+                                            {
+                                                'component': 'div',
+                                                'props': {'class': 'text-h6 text-center text-error'},
+                                                'text': '{{below_standard_count}}'
+                                            },
+                                            {
+                                                'component': 'div',
+                                                'props': {'class': 'text-caption text-center'},
+                                                'text': '不达标'
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12, 'md': 3},
+                        'content': [
+                            {
+                                'component': 'VCard',
+                                'props': {'variant': 'outlined'},
+                                'content': [
+                                    {
+                                        'component': 'VCardText',
+                                        'content': [
+                                            {
+                                                'component': 'div',
+                                                'props': {'class': 'text-center'},
+                                                'content': [
+                                                    {
+                                                        'component': 'VProgressCircular',
+                                                        'props': {
+                                                            'model': 'scan_progress',
+                                                            'size': '50',
+                                                            'width': '4',
+                                                            'color': 'primary'
+                                                        }
+                                                    },
+                                                    {
+                                                        'component': 'div',
+                                                        'props': {'class': 'text-caption mt-1'},
+                                                        'text': '扫描进度'
+                                                    }
+                                                ]
                                             }
                                         ]
                                     }
@@ -605,24 +702,73 @@ class MediaAutoUpgrade(_PluginBase):
                         'props': {'cols': 12},
                         'content': [
                             {
+                                'component': 'VBtn',
+                                'props': {
+                                    'color': 'primary',
+                                    'variant': 'elevated',
+                                    'class': 'mr-2',
+                                    'onclick': 'startScan()',
+                                    'loading': 'scanning'
+                                },
+                                'text': '{{ scanning ? "扫描中..." : "立刻扫描" }}'
+                            },
+                            {
+                                'component': 'VBtn',
+                                'props': {
+                                    'color': 'error',
+                                    'variant': 'outlined',
+                                    'onclick': 'upgradeAllBelowStandard()',
+                                    'disabled': 'below_standard_count === 0'
+                                },
+                                'text': '一键洗板（全部不达标）'
+                            },
+                            {
+                                'component': 'VSpacer'
+                            },
+                            {
+                                'component': 'VSelect',
+                                'props': {
+                                    'model': 'filter_status',
+                                    'items': [
+                                        {'title': '全部', 'value': 'all'},
+                                        {'title': '仅达标', 'value': 'good'},
+                                        {'title': '仅不达标', 'value': 'below_standard'}
+                                    ],
+                                    'density': 'compact',
+                                    'hide-details': True,
+                                    'style': 'max-width: 150px'
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12},
+                        'content': [
+                            {
                                 'component': 'VDataTable',
                                 'props': {
                                     'headers': [
-                                        {'title': '海报', 'key': 'poster', 'sortable': False},
-                                        {'title': '标题', 'key': 'title'},
-                                        {'title': '年份', 'key': 'year'},
-                                        {'title': '分辨率', 'key': 'resolution'},
-                                        {'title': '视频编码', 'key': 'video_codec'},
-                                        {'title': '音频', 'key': 'audio'},
-                                        {'title': '码率', 'key': 'bitrate'},
-                                        {'title': '质量评分', 'key': 'quality_score'},
-                                        {'title': '状态', 'key': 'status'},
-                                        {'title': '操作', 'key': 'actions', 'sortable': False}
+                                        {'title': '海报', 'key': 'poster', 'sortable': False, 'width': '80px'},
+                                        {'title': '标题', 'key': 'title', 'sortable': True},
+                                        {'title': '类型', 'key': 'media_type', 'sortable': True, 'width': '80px'},
+                                        {'title': '分辨率', 'key': 'resolution', 'sortable': True, 'width': '100px'},
+                                        {'title': '视频编码', 'key': 'video_codec', 'sortable': True, 'width': '100px'},
+                                        {'title': '音频', 'key': 'audio', 'sortable': False, 'width': '100px'},
+                                        {'title': '质量评分', 'key': 'quality_score', 'sortable': True, 'width': '100px'},
+                                        {'title': '状态', 'key': 'status_text', 'sortable': True, 'width': '100px'},
+                                        {'title': '操作', 'key': 'actions', 'sortable': False, 'width': '120px'}
                                     ],
                                     'items': 'scan_results',
                                     'items_per_page': 20,
                                     'show_select': True,
-                                    'v_model': 'selected_items'
+                                    'v_model': 'selected_items',
+                                    'return-object': True
                                 }
                             }
                         ]
@@ -640,24 +786,184 @@ class MediaAutoUpgrade(_PluginBase):
                                 'component': 'VBtn',
                                 'props': {
                                     'color': 'primary',
-                                    'class': 'mr-2',
                                     'onclick': 'batchUpgrade()',
                                     'disabled': 'selected_items.length === 0'
                                 },
-                                'text': '批量洗板'
-                            },
-                            {
-                                'component': 'VBtn',
-                                'props': {
-                                    'color': 'error',
-                                    'onclick': 'upgradeAllBelowStandard()'
-                                },
-                                'text': '一键洗板（全部不达标）'
+                                'text': '批量洗板 (已选 {{selected_items.length}} 项)'
                             }
                         ]
                     }
                 ]
             }
+        ]
+
+    def get_page_varspec(self) -> Dict[str, Tuple]:
+        """定义页面变量规格"""
+        return {
+            'scanning': (bool, False),
+            'scan_progress': (int, 0),
+            'scanned_count': (int, 0),
+            'good_count': (int, 0),
+            'below_standard_count': (int, 0),
+            'total_count': (int, 0),
+            'scan_results': (list, []),
+            'selected_items': (list, []),
+            'filter_status': (str, 'all'),
+        }
+
+    def get_page_scripts(self) -> List[str]:
+        """页面脚本"""
+        return [
+            '''
+async function loadResults() {
+    try {
+        const resp = await fetch("/api/mediaautoupgrade/results?status=" + window.filter_status + "&page=1&page_size=1000");
+        const data = await resp.json();
+        window.scan_results = data.results || [];
+        window.scanned_count = data.total || 0;
+        
+        // 统计
+        window.good_count = window.scan_results.filter(r => r.status === "good").length;
+        window.below_standard_count = window.scan_results.filter(r => r.status === "below_standard").length;
+        window.total_count = window.scanned_count;
+        
+        // 更新显示
+        updatePageVars({
+            scan_results: window.scan_results,
+            scanned_count: window.scanned_count,
+            good_count: window.good_count,
+            below_standard_count: window.below_standard_count,
+            total_count: window.total_count,
+            selected_items: []
+        });
+    } catch (e) {
+        console.error("加载结果失败:", e);
+    }
+}
+
+async function checkStatus() {
+    try {
+        const resp = await fetch("/api/mediaautoupgrade/status");
+        const data = await resp.json();
+        window.scanning = data.scanning || false;
+        window.scan_progress = data.progress || 0;
+        
+        updatePageVars({
+            scanning: window.scanning,
+            scan_progress: window.scan_progress
+        });
+        
+        if (window.scanning) {
+            setTimeout(checkStatus, 2000);
+        } else {
+            loadResults();
+        }
+    } catch (e) {
+        console.error("检查状态失败:", e);
+    }
+}
+
+async function startScan() {
+    try {
+        window.scanning = true;
+        updatePageVars({ scanning: true });
+        
+        const resp = await fetch("/api/mediaautoupgrade/scan", {
+            method: "POST"
+        });
+        const data = await resp.json();
+        
+        if (data.success) {
+            setTimeout(checkStatus, 1000);
+        } else {
+            window.scanning = false;
+            updatePageVars({ scanning: false, scan_progress: 0 });
+            alert(data.message || "扫描启动失败");
+        }
+    } catch (e) {
+        window.scanning = false;
+        updatePageVars({ scanning: false, scan_progress: 0 });
+        alert("扫描失败: " + e.message);
+    }
+}
+
+async function singleUpgrade(mediaId, title) {
+    if (!confirm("确认提交洗板订阅: " + title + "?")) return;
+    try {
+        const resp = await fetch("/api/mediaautoupgrade/upgrade", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ media_ids: [mediaId] })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            alert("洗板订阅提交成功！");
+        } else {
+            alert("提交失败: " + data.message);
+        }
+    } catch (e) {
+        alert("提交失败: " + e.message);
+    }
+}
+
+async function batchUpgrade() {
+    if (window.selected_items.length === 0) {
+        alert("请先选择要洗板的媒体");
+        return;
+    }
+    const count = window.selected_items.length;
+    if (!confirm("确认批量提交 " + count + " 个洗板订阅?")) return;
+    try {
+        const ids = window.selected_items.map(item => item.id);
+        const resp = await fetch("/api/mediaautoupgrade/upgrade", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ media_ids: ids })
+        });
+        const data = await resp.json();
+        alert(data.message);
+        window.selected_items = [];
+        updatePageVars({ selected_items: [] });
+    } catch (e) {
+        alert("批量提交失败: " + e.message);
+    }
+}
+
+async function upgradeAllBelowStandard() {
+    if (window.below_standard_count === 0) {
+        alert("没有不达标的媒体");
+        return;
+    }
+    if (!confirm("确认一键洗板全部 " + window.below_standard_count + " 个不达标媒体?")) return;
+    try {
+        const ids = window.scan_results
+            .filter(r => r.status === "below_standard")
+            .map(r => r.id);
+        const resp = await fetch("/api/mediaautoupgrade/upgrade", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ media_ids: ids })
+        });
+        const data = await resp.json();
+        alert(data.message);
+    } catch (e) {
+        alert("提交失败: " + e.message);
+    }
+}
+
+// 监听筛选条件变化
+window.addEventListener("message", (event) => {
+    if (event.data.type === "var_update" && event.data.name === "filter_status") {
+        loadResults();
+    }
+});
+
+// 页面加载时获取结果
+window.addEventListener("DOMContentLoaded", () => {
+    loadResults();
+    checkStatus();
+});
+            '''
         ]
     
     def stop_service(self):
@@ -686,6 +992,10 @@ class MediaAutoUpgrade(_PluginBase):
         if self._scanning:
             return {"success": False, "message": "扫描正在进行中"}
         
+        # 检查 Emby 配置
+        if not self._emby_host or not self._emby_api_key:
+            return {"success": False, "message": "Emby 配置未设置，请在设置中选择 Emby 服务器或手动填写配置"}
+        
         threading.Thread(target=self._scan_media_quality).start()
         return {"success": True, "message": "扫描任务已启动"}
     
@@ -707,6 +1017,19 @@ class MediaAutoUpgrade(_PluginBase):
         results = self._scan_results
         if filter_status and filter_status != 'all':
             results = [r for r in results if r.get('status') == filter_status]
+        
+        # 添加 status_text 供前端显示
+        for r in results:
+            status = r.get('status', '')
+            if status == 'good':
+                r['status_text'] = '✅ 达标'
+                r['status_color'] = 'success'
+            elif status == 'below_standard':
+                r['status_text'] = '❌ 不达标'
+                r['status_color'] = 'error'
+            else:
+                r['status_text'] = '⚠️ 未知'
+                r['status_color'] = 'warning'
         
         total = len(results)
         start = (page - 1) * page_size
