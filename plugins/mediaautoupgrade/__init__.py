@@ -22,7 +22,6 @@ from urllib.parse import urljoin
 from app.core.config import settings
 from app.core.event import eventmanager, Event
 from app.core.metainfo import MetaInfo
-from app.helper.emby import EmbyHelper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType
