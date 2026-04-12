@@ -1,0 +1,3 @@
+# MediaAutoUpgrade Plugin Dependencies
+# No additional dependencies required
+# Uses MoviePilot built-in modules only

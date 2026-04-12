@@ -4,7 +4,7 @@
     "description": "自动完成影巢每日签到，支持失败重试和历史记录",
     "labels": "签到,影巢",
     "version": "2.4.0",
-    "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico",
+    "icon": "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico",
     "author": "kingbb2001",
     "level": 1,
     "v2": true,
@@ -34,6 +34,20 @@
       "v1.2.0": "自动登录刷新Cookie：cloudscraper与Playwright兜底；修复重复失败记录；默认域名更新为 hdhive.com",
       "v1.1.0": "域名改为可配置；统一API拼接(Referer/Origin/接口)，精简日志",
       "v1.0": "首次发布"
+    }
+  },
+  "MediaAutoUpgrade": {
+    "name": "MediaAutoUpgrade",
+    "description": "自动检测媒体库视频质量，支持展示质量报告并提交洗板订阅",
+    "labels": "洗板,质量,Emby,升级",
+    "version": "1.1.0",
+    "icon": "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/mediaautoupgrade.png",
+    "author": "kingbb2001",
+    "level": 2,
+    "v2": true,
+    "history": {
+      "v1.1.0": "优化扫描逻辑：分批获取(每批500个)、结果持久化到JSON文件、支持断点续扫",
+      "v1.0.0": "初始版本，支持Emby媒体质量检测、质量报告展示、手动/自动洗板订阅"
     }
   }
 }
