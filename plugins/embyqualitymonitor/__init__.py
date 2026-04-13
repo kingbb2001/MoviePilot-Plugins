@@ -110,6 +110,27 @@ class EmbyQualityMonitor(_PluginBase):
         if self._enabled:
             self.__run_service()
     
+    def update_config(self, config: dict) -> bool:
+        """更新配置（重写基类方法）"""
+        old_emby_name = self._emby_name
+        new_emby_name = config.get("emby_name")
+        
+        # 调用父类方法更新配置
+        result = super().update_config(config)
+        
+        # 如果Emby服务器发生了变化，刷新媒体库缓存
+        if new_emby_name and new_emby_name != old_emby_name:
+            logger.info(f"Emby服务器已变更: {old_emby_name} -> {new_emby_name}，正在刷新媒体库缓存")
+            self.__refresh_library_cache()
+            
+            # 保存缓存到配置
+            if self._cached_libraries:
+                config["cached_libraries"] = self._cached_libraries
+                # 再次保存配置以持久化缓存
+                super().update_config(config)
+        
+        return result
+    
     def get_state(self) -> bool:
         """获取插件状态"""
         return self._enabled
@@ -737,28 +758,18 @@ class EmbyQualityMonitor(_PluginBase):
             movie_libraries = []
             
             for library in libraries:
-                # 调试：打印library对象的属性
-                logger.debug(f"Library对象: {library}, 类型: {type(library)}")
-                logger.debug(f"Library属性: {dir(library)}")
+                # MediaServerLibrary对象的属性：server, id, name, path, type, image, link, server_type
+                lib_type = library.type if hasattr(library, 'type') else None
+                lib_name = library.name if hasattr(library, 'name') else str(library)
+                lib_id = library.id if hasattr(library, 'id') else None
                 
-                # 尝试不同的属性名获取媒体库类型
-                lib_type = None
-                if hasattr(library, 'type'):
-                    lib_type = library.type
-                elif hasattr(library, 'Type'):
-                    lib_type = library.Type
-                elif hasattr(library, 'collection_type'):
-                    lib_type = library.collection_type
-                elif hasattr(library, 'CollectionType'):
-                    lib_type = library.CollectionType
-                
-                logger.info(f"媒体库: {library.name}, 类型: {lib_type}")
+                logger.info(f"媒体库: {lib_name}, 类型: {lib_type}, ID: {lib_id}")
                 
                 # 只缓存电影类型的媒体库
                 if lib_type and lib_type.lower() in ['movies', 'movie']:
                     movie_libraries.append({
-                        'name': library.name,
-                        'item_id': library.item_id if hasattr(library, 'item_id') else library.ItemId
+                        'name': lib_name,
+                        'id': lib_id
                     })
             
             self._cached_libraries = movie_libraries
