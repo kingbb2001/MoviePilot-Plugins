@@ -90,6 +90,13 @@ class EmbyQualityMonitor(_PluginBase):
             self._scan_results = config.get("scan_results", [])
             self._scan_error = config.get("scan_error")
             self._last_scan_time = config.get("last_scan_time")
+            
+            # 加载缓存的媒体库列表
+            self._cached_libraries = config.get("cached_libraries", [])
+        
+        # 如果选择了Emby服务器，尝试获取媒体库列表
+        if self._emby_name:
+            self.__refresh_library_cache()
         
         # 初始化质量检查器
         self._checker = EmbyQualityChecker(
@@ -169,6 +176,9 @@ class EmbyQualityMonitor(_PluginBase):
         # 获取可用的Emby服务器列表
         emby_servers = self.__get_emby_servers()
         
+        # 获取缓存的媒体库列表
+        library_items = self.__get_cached_libraries()
+        
         return [
             # ===== 插件说明 =====
             {
@@ -197,14 +207,11 @@ class EmbyQualityMonitor(_PluginBase):
             {
                 'component': 'VCard',
                 'props': {
-                    'class': 'mb-4'
+                    'class': 'mb-6'
                 },
                 'content': [
                     {
                         'component': 'VCardTitle',
-                        'props': {
-                            'class': 'text-h6 pb-0'
-                        },
                         'text': '基础配置'
                     },
                     {
@@ -246,14 +253,11 @@ class EmbyQualityMonitor(_PluginBase):
             {
                 'component': 'VCard',
                 'props': {
-                    'class': 'mb-4'
+                    'class': 'mb-6'
                 },
                 'content': [
                     {
                         'component': 'VCardTitle',
-                        'props': {
-                            'class': 'text-h6 pb-0'
-                        },
                         'text': 'Emby服务器配置'
                     },
                     {
@@ -273,14 +277,26 @@ class EmbyQualityMonitor(_PluginBase):
                                 }
                             },
                             {
-                                'component': 'VTextField',
+                                'component': 'VSelect',
                                 'props': {
                                     'model': 'library_name',
-                                    'label': '媒体库名称',
-                                    'placeholder': '电影',
-                                    'hint': '输入要监控的Emby媒体库名称（如：电影、动画电影等）',
-                                    'persistentHint': True
+                                    'label': '媒体库',
+                                    'items': library_items,
+                                    'itemTitle': 'title',
+                                    'itemValue': 'value',
+                                    'hint': '选择要监控的Emby电影媒体库',
+                                    'persistentHint': True,
+                                    'class': 'mb-2'
                                 }
+                            },
+                            {
+                                'component': 'VAlert',
+                                'props': {
+                                    'type': 'info',
+                                    'variant': 'text',
+                                    'class': 'text-caption'
+                                },
+                                'text': '💡 如果下拉框中没有媒体库选项，请先选择Emby服务器并保存配置，然后重新打开配置页面。'
                             }
                         ]
                     }
@@ -291,14 +307,11 @@ class EmbyQualityMonitor(_PluginBase):
             {
                 'component': 'VCard',
                 'props': {
-                    'class': 'mb-4'
+                    'class': 'mb-6'
                 },
                 'content': [
                     {
                         'component': 'VCardTitle',
-                        'props': {
-                            'class': 'text-h6 pb-0'
-                        },
                         'text': '质量标准'
                     },
                     {
@@ -383,7 +396,7 @@ class EmbyQualityMonitor(_PluginBase):
                 'props': {
                     'type': 'warning',
                     'variant': 'tonal',
-                    'class': 'mb-4'
+                    'class': 'mb-6'
                 },
                 'content': [
                     {
@@ -449,6 +462,7 @@ class EmbyQualityMonitor(_PluginBase):
             "cron": self._cron,
             "notify": self._notify,
             "onlyonce": self._onlyonce,
+            "cached_libraries": self._cached_libraries,
         }
     
     def get_page(self) -> List[dict]:
@@ -705,6 +719,49 @@ class EmbyQualityMonitor(_PluginBase):
         except Exception as e:
             logger.error(f"获取Emby服务器列表失败: {e}")
         return servers
+    
+    def __refresh_library_cache(self):
+        """刷新媒体库缓存"""
+        if not self._emby_name:
+            return
+        
+        try:
+            # 获取Emby实例
+            emby_instance = self.emby_instance
+            if not emby_instance:
+                logger.warning(f"未找到Emby服务器: {self._emby_name}")
+                return
+            
+            # 获取所有媒体库
+            libraries = emby_instance.get_librarys()
+            movie_libraries = []
+            
+            for library in libraries:
+                # 只缓存电影类型的媒体库
+                if library.collection_type == "movies":
+                    movie_libraries.append({
+                        'name': library.name,
+                        'item_id': library.item_id
+                    })
+            
+            self._cached_libraries = movie_libraries
+            logger.info(f"已缓存 {len(movie_libraries)} 个电影媒体库")
+            
+        except Exception as e:
+            logger.error(f"刷新媒体库缓存失败: {e}")
+    
+    def __get_cached_libraries(self) -> List[dict]:
+        """获取缓存的媒体库列表（用于表单下拉）"""
+        if not self._cached_libraries:
+            return []
+        
+        return [
+            {
+                'title': lib['name'],
+                'value': lib['name']
+            }
+            for lib in self._cached_libraries
+        ]
     
     @property
     def emby_instance(self):
