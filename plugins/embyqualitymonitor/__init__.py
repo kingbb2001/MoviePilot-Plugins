@@ -27,7 +27,7 @@ class EmbyQualityMonitor(_PluginBase):
     # 插件元数据
     plugin_name = "Emby质量监控"
     plugin_desc = "监控Emby媒体库中的电影质量，自动识别不达标资源并批量创建洗版订阅"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     plugin_author = "kalax"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/embyqualitymonitor.svg"
     plugin_order = 30
@@ -487,17 +487,133 @@ class EmbyQualityMonitor(_PluginBase):
         }
     
     def get_page(self) -> List[dict]:
-        """返回插件页面 - 使用 VDataTable 显示扫描结果（通过 varspec+scripts 动态更新）"""
-        # 静态状态颜色（用于初始值）
-        status_color_init = {
-            "idle": "info",
-            "scanning": "warning",
-            "completed": "success",
-            "error": "error"
-        }
+        """
+        构建插件详情页面（完全参照 hdhivesignkb 的静态组件树模式）
+        """
+        # 每次调用时从配置读取最新数据
+        config = self.get_config() or {}
+        results: List[dict] = config.get("scan_results", [])
+        scan_status = config.get("scan_status", "idle")
+        scan_progress = config.get("scan_progress", {"current": 0, "total": 0})
+        last_scan_time = config.get("last_scan_time")
+        scan_error = config.get("scan_error")
+
+        # 状态显示
+        status_color_map = {"idle": "info", "scanning": "warning", "completed": "success", "error": "error"}
+        status_text_map = {"idle": "等待扫描", "scanning": "正在扫描中...", "completed": "扫描已完成", "error": "扫描出错"}
+        status_color = status_color_map.get(scan_status, "info")
+        status_text = status_text_map.get(scan_status, scan_status)
+        if scan_status == "scanning" and scan_progress.get("total", 0) > 0:
+            pct = round(scan_progress["current"] / scan_progress["total"] * 100)
+            status_text = f"扫描中 {scan_progress['current']}/{scan_progress['total']} ({pct}%)"
+        time_text = "从未扫描"
+        if last_scan_time:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(last_scan_time.replace("Z", "+00:00"))
+                time_text = dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                time_text = str(last_scan_time)
+
+        # 提示语
+        if results:
+            result_tip = f"共发现 {len(results)} 部不达标电影，可勾选后批量订阅"
+            tip_type = "warning"
+        elif scan_status == "completed":
+            result_tip = "太棒了！所有电影都达标，无需订阅"
+            tip_type = "success"
+        elif scan_error:
+            result_tip = f"扫描出错：{scan_error}"
+            tip_type = "error"
+        else:
+            result_tip = "点击「立即扫描」开始分析Emby媒体库"
+            tip_type = "info"
+
+        # 构建表格行
+        rows = []
+        for movie in results:
+            quality_info = movie.get("current_quality") or {}
+            if isinstance(quality_info, dict):
+                quality_summary = " ".join(filter(None, [
+                    quality_info.get("resolution", ""),
+                    quality_info.get("codec", "").upper(),
+                    quality_info.get("hdr", ""),
+                    quality_info.get("source", "")
+                ])) or "未知"
+            else:
+                quality_summary = str(quality_info)
+            issues_text = " | ".join(movie.get("issues", [])) or "—"
+            title = movie.get("title", "未知")
+            year = movie.get("year", "")
+            tmdbid = movie.get("tmdbid") or movie.get("tmdb_id") or ""
+            item_id = movie.get("item_id") or ""
+            # 操作按钮（跳转到MP订阅页面，传递tmdbid）
+            action_btn = {
+                'component': 'VBtn',
+                'props': {
+                    'color': 'primary', 'variant': 'tonal', 'size': 'small',
+                    'href': f'/subscribe?tmdbid={tmdbid}&mediatype=movie' if tmdbid else '#',
+                    'target': '_blank',
+                    'disabled': not bool(tmdbid)
+                },
+                'text': '订阅'
+            }
+
+            rows.append({
+                'component': 'tr',
+                'content': [
+                    {'component': 'td', 'props': {'class': 'text-body-2'}, 'text': f'{title} ({year})'},
+                    {'component': 'td', 'props': {'class': 'text-body-2'}, 'text': quality_summary},
+                    {'component': 'td', 'props': {'class': 'text-body-2 text-error'}, 'text': issues_text},
+                    {'component': 'td', 'props': {'class': 'text-center'}, 'content': [action_btn]},
+                ]
+            })
+
+        table_section = []
+        if rows:
+            table_section = [{
+                'component': 'VCard',
+                'props': {'variant': 'outlined', 'class': 'mt-3'},
+                'content': [
+                    {
+                        'component': 'VCardTitle',
+                        'props': {'class': 'text-h6'},
+                        'text': f'📋 不达标电影列表（共 {len(results)} 部）'
+                    },
+                    {
+                        'component': 'VCardText',
+                        'props': {'class': 'pa-0'},
+                        'content': [{
+                            'component': 'VTable',
+                            'props': {'hover': True, 'density': 'compact'},
+                            'content': [
+                                {
+                                    'component': 'thead',
+                                    'content': [{
+                                        'component': 'tr',
+                                        'content': [
+                                            {'component': 'th', 'text': '电影'},
+                                            {'component': 'th', 'text': '当前质量'},
+                                            {'component': 'th', 'text': '不达标原因'},
+                                            {'component': 'th', 'text': '操作', 'props': {'class': 'text-center'}},
+                                        ]
+                                    }]
+                                },
+                                {'component': 'tbody', 'content': rows}
+                            ]
+                        }]
+                    }
+                ]
+            }]
+        else:
+            table_section = [{
+                'component': 'VAlert',
+                'props': {'type': 'info', 'variant': 'tonal', 'class': 'mt-3'},
+                'text': '暂无扫描结果，请先点击「立即扫描」分析Emby媒体库'
+            }]
 
         return [
-            # ===== 顶部状态栏（4个指标卡片） =====
+            # ===== 顶部4个状态卡片 =====
             {
                 'component': 'VRow',
                 'content': [
@@ -510,7 +626,7 @@ class EmbyQualityMonitor(_PluginBase):
                             'content': [{
                                 'component': 'VCardText',
                                 'content': [
-                                    {'component': 'div', 'props': {'class': 'text-h5 text-center font-weight-bold text-error'}, 'text': '{{unqualified_count}}'},
+                                    {'component': 'div', 'props': {'class': 'text-h5 text-center font-weight-bold text-error'}, 'text': f'{len(results)}'},
                                     {'component': 'div', 'props': {'class': 'text-caption text-center'}, 'text': '不达标电影'}
                                 ]
                             }]
@@ -525,8 +641,8 @@ class EmbyQualityMonitor(_PluginBase):
                             'content': [{
                                 'component': 'VCardText',
                                 'content': [
-                                    {'component': 'div', 'props': {'class': 'text-h5 text-center font-weight-bold'}, 'text': '{{total_count}}'},
-                                    {'component': 'div', 'props': {'class': 'text-caption text-center'}, 'text': '总电影数'}
+                                    {'component': 'div', 'props': {'class': 'text-h5 text-center font-weight-bold'}, 'text': f'{scan_progress.get("total", 0)}'},
+                                    {'component': 'div', 'props': {'class': 'text-caption text-center'}, 'text': '媒体库总电影数'}
                                 ]
                             }]
                         }]
@@ -540,9 +656,8 @@ class EmbyQualityMonitor(_PluginBase):
                             'content': [{
                                 'component': 'VCardText',
                                 'content': [
-                                    {'component': 'div', 'props': {'class': 'text-center'}},
-                                    {'component': 'VProgressCircular', 'props': {'model': 'scan_progress_pct', 'size': '50', 'width': '4', 'color': 'primary'}},
-                                    {'component': 'div', 'props': {'class': 'text-caption text-center mt-1'}, 'text': '{{scan_progress_text}}'}
+                                    {'component': 'VAlert', 'props': {'type': status_color, 'variant': 'tonal', 'density': 'compact', 'class': 'mb-2'}, 'text': status_text},
+                                    {'component': 'div', 'props': {'class': 'text-caption text-center', 'style': 'color: #999'}, 'text': f'上次扫描：{time_text}'}
                                 ]
                             }]
                         }]
@@ -556,12 +671,11 @@ class EmbyQualityMonitor(_PluginBase):
                             'content': [{
                                 'component': 'VCardText',
                                 'content': [
-                                    {'component': 'VAlert', 'props': {'type': status_color_init.get(self._scan_status, 'info'), 'variant': 'tonal', 'density': 'compact', 'class': 'mb-2'}, 'text': '{{scan_status_text}}'},
-                                    {'component': 'div', 'props': {'class': 'text-caption text-center', 'style': 'color: #999'}, 'text': '{{last_scan_time_text}}'}
+                                    {'component': 'VAlert', 'props': {'type': tip_type, 'variant': 'tonal', 'density': 'compact'}, 'text': result_tip}
                                 ]
                             }]
                         }]
-                    }
+                    },
                 ]
             },
 
@@ -577,187 +691,38 @@ class EmbyQualityMonitor(_PluginBase):
                                 'component': 'VBtn',
                                 'props': {
                                     'color': 'primary', 'variant': 'elevated', 'class': 'mr-2',
-                                    'onclick': 'startScan()', 'loading': 'scanning'
+                                    'onclick': "fetch('/api/embyqualitymonitor/scan', {method:'POST'}).then(r=>r.json()).then(d=>{if(d.success){alert('扫描已启动，请稍后刷新页面查看结果');location.reload();}else{alert(d.message||'扫描失败');}}).catch(e=>alert('请求失败:'+e))"
                                 },
-                                'text': '{{ scanning ? "扫描中..." : "立即扫描" }}'
+                                'text': '立即扫描'
                             },
                             {
                                 'component': 'VBtn',
                                 'props': {
-                                    'color': 'error', 'variant': 'outlined', 'class': 'mr-2',
-                                    'onclick': 'batchSubscribe()', 'disabled': 'selected_items.length === 0'
+                                    'color': 'success', 'variant': 'outlined', 'class': 'mr-2',
+                                    'onclick': 'location.reload()'
                                 },
-                                'text': '批量订阅 (已选 {{selected_items.length}} 项)'
+                                'text': '刷新结果'
                             },
-                            {'component': 'VSpacer'},
                             {
-                                'component': 'VSelect',
+                                'component': 'VBtn',
                                 'props': {
-                                    'model': 'filter_status',
-                                    'items': [
-                                        {'title': '全部', 'value': 'all'},
-                                        {'title': '仅不达标', 'value': 'below'}
-                                    ],
-                                    'density': 'compact', 'hide-details': True,
-                                    'style': 'max-width: 150px'
-                                }
-                            }
+                                    'color': 'info', 'variant': 'tonal', 'class': 'mr-2',
+                                    'onclick': "fetch('/api/embyqualitymonitor/libraries', {headers:{'Accept':'application/json'}}).then(r=>r.json()).then(d=>{if(d.success){alert('电影类媒体库: ' + d.data.map(l=>l.name).join(', '));}else{alert(d.message||'获取失败');}}).catch(e=>alert(e))"
+                                },
+                                'text': '查看媒体库'
+                            },
                         ]
                     }
                 ]
             },
 
-            # ===== 结果表格 =====
-            {
-                'component': 'VRow',
-                'content': [
-                    {
-                        'component': 'VCol',
-                        'props': {'cols': 12},
-                        'content': [
-                            {
-                                'component': 'VAlert',
-                                'props': {'type': 'info', 'variant': 'tonal', 'class': 'mb-3'},
-                                'text': '{{result_tip}}'
-                            },
-                            {
-                                'component': 'VDataTable',
-                                'props': {
-                                    'headers': [
-                                        {'title': '电影名称', 'key': 'title', 'sortable': True},
-                                        {'title': '年份', 'key': 'year', 'sortable': True, 'width': '80px'},
-                                        {'title': '当前质量', 'key': 'quality_summary', 'sortable': False},
-                                        {'title': '不达标原因', 'key': 'issues_text', 'sortable': False},
-                                        {'title': '操作', 'key': 'actions', 'sortable': False, 'width': '100px'}
-                                    ],
-                                    'items': 'scan_results',
-                                    'items_per_page': 20,
-                                    'show_select': True,
-                                    'v_model': 'selected_items',
-                                    'return-object': True
-                                }
-                            }
-                        ]
-                    }
-                ]
-            }
+            # ===== 结果表格或提示 =====
+            *table_section
         ]
-
-    def get_page_varspec(self) -> Dict[str, Tuple]:
-        """定义页面变量规格 - 供前端 updatePageVars 使用"""
-        return {
-            'scanning': (bool, False),
-            'scan_status': (str, self._scan_status),
-            'scan_status_text': (str, '等待扫描'),
-            'scan_progress_pct': (int, 0),
-            'scan_progress_text': (str, '0/0'),
-            'unqualified_count': (int, 0),
-            'total_count': (int, 0),
-            'last_scan_time_text': (str, '从未扫描'),
-            'scan_results': (list, []),
-            'selected_items': (list, []),
-            'filter_status': (str, 'all'),
-            'result_tip': (str, '点击"立即扫描"开始分析Emby媒体库'),
-        }
 
     def get_page_scripts(self) -> List[str]:
-        """页面脚本 - 负责从API获取数据并更新页面变量"""
-        return [
-            '''
-async function loadStatus() {
-    try {
-        const resp = await fetch("/api/embyqualitymonitor/status");
-        const data = await resp.json();
-        if (data.success) {
-            const d = data.data;
-            const pct = (d.progress && d.progress.total > 0)
-                ? Math.round(d.progress.current / d.progress.total * 100) : 0;
-            const statusTextMap = {
-                "idle": "等待扫描",
-                "scanning": "正在扫描中...",
-                "completed": "扫描已完成",
-                "error": "扫描出错"
-            };
-            let timeText = "从未扫描";
-            if (d.last_scan_time) {
-                const t = new Date(d.last_scan_time);
-                timeText = t.toLocaleString("zh-CN");
-            }
-            updatePageVars({
-                scanning: d.status === "scanning",
-                scan_status: d.status,
-                scan_status_text: statusTextMap[d.status] || d.status,
-                scan_progress_pct: pct,
-                scan_progress_text: (d.progress ? d.progress.current + "/" + d.progress.total : "0/0"),
-                unqualified_count: d.total_count || 0,
-                total_count: d.progress ? d.progress.total : 0,
-                last_scan_time_text: timeText,
-                scan_results: d.results || [],
-                result_tip: (d.results && d.results.length > 0)
-                    ? ("共发现 " + d.results.length + " 部不达标电影，可勾选后批量订阅")
-                    : (d.status === "completed"
-                        ? "太棒了！所有电影都达标！"
-                        : "点击"立即扫描"开始分析Emby媒体库")
-            });
-        }
-    } catch (e) {
-        console.error("加载状态失败:", e);
-    }
-}
-
-async function startScan() {
-    try {
-        updatePageVars({ scanning: true, scan_status: "scanning", scan_status_text: "正在扫描中...", result_tip: "正在扫描，请稍候..." });
-        const resp = await fetch("/api/embyqualitymonitor/scan", { method: "POST" });
-        const data = await resp.json();
-        if (data.success) {
-            pollStatus();
-        } else {
-            updatePageVars({ scanning: false, scan_status: "error", scan_status_text: "扫描启动失败" });
-            alert(data.message || "扫描启动失败");
-        }
-    } catch (e) {
-        updatePageVars({ scanning: false, scan_status: "error", scan_status_text: "扫描失败" });
-        alert("扫描失败: " + e.message);
-    }
-}
-
-let pollTimer = null;
-function pollStatus() {
-    clearTimeout(pollTimer);
-    loadStatus().then(() => {
-        if (window.scanning) {
-            pollTimer = setTimeout(pollStatus, 2000);
-        }
-    });
-}
-
-async function batchSubscribe() {
-    const items = window.selected_items || [];
-    if (items.length === 0) { alert("请先选择要订阅的电影"); return; }
-    if (!confirm("确定要为选中的 " + items.length + " 部电影创建洗版订阅吗？")) { return; }
-    try {
-        const resp = await fetch("/api/embyqualitymonitor/subscribe_batch", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ items: items.map(i => ({ tmdbid: i.tmdbid, title: i.title })) })
-        });
-        const data = await resp.json();
-        if (data.success) {
-            alert("成功创建 " + data.data.count + " 个订阅！");
-            updatePageVars({ selected_items: [] });
-        } else {
-            alert("订阅失败: " + (data.message || "未知错误"));
-        }
-    } catch (e) {
-        alert("订阅失败: " + e.message);
-    }
-}
-
-// 页面加载时自动获取最新状态
-loadStatus();
-'''
-        ]
+        """页面脚本 - 扫描完成后提示刷新"""
+        return []
 
     def stop_service(self):
         """停止插件服务"""
