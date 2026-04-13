@@ -27,7 +27,7 @@ class EmbyQualityMonitor(_PluginBase):
     # 插件元数据
     plugin_name = "Emby质量监控"
     plugin_desc = "监控Emby媒体库中的电影质量，自动识别不达标资源并批量创建洗版订阅"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     plugin_author = "kalax"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/embyqualitymonitor.svg"
     plugin_order = 30
@@ -489,6 +489,9 @@ class EmbyQualityMonitor(_PluginBase):
     def get_page(self) -> List[dict]:
         """返回插件页面 - 显示扫描状态和结果"""
         try:
+            # 调试：输出扫描结果数量
+            logger.info(f"生成页面，扫描结果数量: {len(self._scan_results)}, 状态: {self._scan_status}")
+            
             # 状态映射
             status_text = {
                 "idle": "等待扫描",
@@ -516,9 +519,13 @@ class EmbyQualityMonitor(_PluginBase):
                 except Exception as e:
                     logger.debug(f"处理扫描结果项失败: {e}")
             
-            return [
-            # 状态卡片
-            {
+            logger.info(f"准备显示 {len(scan_results_display)} 部电影")
+            
+            # 构建页面组件
+            page_components = []
+            
+            # 1. 状态卡片
+            page_components.append({
                 'component': 'VCard',
                 'props': {
                     'class': 'mb-4'
@@ -531,7 +538,6 @@ class EmbyQualityMonitor(_PluginBase):
                     {
                         'component': 'VCardText',
                         'content': [
-                            # 当前状态
                             {
                                 'component': 'VAlert',
                                 'props': {
@@ -540,71 +546,19 @@ class EmbyQualityMonitor(_PluginBase):
                                     'class': 'mb-3'
                                 },
                                 'text': status_text.get(self._scan_status, '未知状态')
-                            },
-                            
-                            # 进度条（扫描中时显示）
-                            {
-                                'component': 'div',
-                                'props': {
-                                    'v-if': self._scan_status == "scanning"
-                                },
-                                'content': [
-                                    {
-                                        'component': 'div',
-                                        'text': f"进度：{self._scan_progress['current']} / {self._scan_progress['total']}",
-                                        'props': {
-                                            'class': 'text-caption mb-2'
-                                        }
-                                    },
-                                    {
-                                        'component': 'VProgressLinear',
-                                        'props': {
-                                            'model-value': (self._scan_progress['current'] / self._scan_progress['total'] * 100) if self._scan_progress['total'] > 0 else 0,
-                                            'color': 'primary',
-                                            'height': '6'
-                                        }
-                                    }
-                                ]
-                            },
-                            
-                            # 错误信息
-                            {
-                                'component': 'div',
-                                'props': {
-                                    'v-if': self._scan_error
-                                },
-                                'content': [
-                                    {
-                                        'component': 'div',
-                                        'text': f"错误：{self._scan_error}",
-                                        'props': {
-                                            'class': 'text-error text-caption'
-                                        }
-                                    }
-                                ]
-                            },
-                            
-                            # 最后扫描时间
-                            {
-                                'component': 'div',
-                                'props': {
-                                    'v-if': self._last_scan_time,
-                                    'class': 'text-caption mt-2'
-                                },
-                                'text': f"最后扫描时间：{self._last_scan_time}"
                             }
                         ]
                     }
                 ]
-            },
+            })
             
-            # 结果卡片
-            {
-                'component': 'VCard',
-                'props': {
-                    'v-if': len(scan_results_display) > 0,
-                    'class': 'mb-4'
-                },
+            # 2. 结果卡片（如果有结果）
+            if len(scan_results_display) > 0:
+                page_components.append({
+                    'component': 'VCard',
+                    'props': {
+                        'class': 'mb-4'
+                    },
                 'content': [
                     {
                         'component': 'VCardTitle',
@@ -727,8 +681,52 @@ class EmbyQualityMonitor(_PluginBase):
                         }
                     }
                 ]
-            }
-        ]
+            })
+            
+            # 3. 操作提示
+            page_components.append({
+                'component': 'VAlert',
+                'props': {
+                    'type': 'info',
+                    'variant': 'tonal'
+                },
+                'content': [
+                    {
+                        'component': 'div',
+                        'text': '💡 操作提示：'
+                    },
+                    {
+                        'component': 'div',
+                        'text': '1. 在"设置"页面配置Emby服务器和媒体库',
+                        'props': {
+                            'class': 'mt-1'
+                        }
+                    },
+                    {
+                        'component': 'div',
+                        'text': '2. 保存配置后插件会自动扫描',
+                        'props': {
+                            'class': 'mt-1'
+                        }
+                    },
+                    {
+                        'component': 'div',
+                        'text': '3. 扫描结果会在上方显示',
+                        'props': {
+                            'class': 'mt-1'
+                        }
+                    },
+                    {
+                        'component': 'div',
+                        'text': '4. 刷新页面可查看最新状态',
+                        'props': {
+                            'class': 'mt-1'
+                        }
+                    }
+                ]
+            })
+            
+            return page_components
         except Exception as e:
             logger.error(f"生成插件页面失败: {e}", exc_info=True)
             return [
