@@ -737,18 +737,35 @@ class EmbyQualityMonitor(_PluginBase):
             movie_libraries = []
             
             for library in libraries:
+                # 调试：打印library对象的属性
+                logger.debug(f"Library对象: {library}, 类型: {type(library)}")
+                logger.debug(f"Library属性: {dir(library)}")
+                
+                # 尝试不同的属性名获取媒体库类型
+                lib_type = None
+                if hasattr(library, 'type'):
+                    lib_type = library.type
+                elif hasattr(library, 'Type'):
+                    lib_type = library.Type
+                elif hasattr(library, 'collection_type'):
+                    lib_type = library.collection_type
+                elif hasattr(library, 'CollectionType'):
+                    lib_type = library.CollectionType
+                
+                logger.info(f"媒体库: {library.name}, 类型: {lib_type}")
+                
                 # 只缓存电影类型的媒体库
-                if library.collection_type == "movies":
+                if lib_type and lib_type.lower() in ['movies', 'movie']:
                     movie_libraries.append({
                         'name': library.name,
-                        'item_id': library.item_id
+                        'item_id': library.item_id if hasattr(library, 'item_id') else library.ItemId
                     })
             
             self._cached_libraries = movie_libraries
-            logger.info(f"已缓存 {len(movie_libraries)} 个电影媒体库")
+            logger.info(f"已缓存 {len(movie_libraries)} 个电影媒体库: {[lib['name'] for lib in movie_libraries]}")
             
         except Exception as e:
-            logger.error(f"刷新媒体库缓存失败: {e}")
+            logger.error(f"刷新媒体库缓存失败: {e}", exc_info=True)
     
     def __get_cached_libraries(self) -> List[dict]:
         """获取缓存的媒体库列表（用于表单下拉）"""
