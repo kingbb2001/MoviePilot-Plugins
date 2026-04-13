@@ -27,7 +27,7 @@ class EmbyQualityMonitor(_PluginBase):
     # 插件元数据
     plugin_name = "Emby质量监控"
     plugin_desc = "监控Emby媒体库中的电影质量，自动识别不达标资源并批量创建洗版订阅"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "kalax"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/embyqualitymonitor.svg"
     plugin_order = 30
