@@ -59,12 +59,13 @@
     "name": "Emby质量监控",
     "description": "监控Emby媒体库中的电影质量，自动识别不达标资源并批量创建MP洗版订阅",
     "labels": "洗板,质量,Emby,监控",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "icon": "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/embyqualitymonitor.svg",
     "author": "kingbb2001",
     "level": 2,
     "v2": true,
     "history": {
+      "v1.0.3": "修复扫描错误日志中的属性名（item.name → item.title）",
       "v1.0.2": "修复扫描代码中的属性名错误（MediaServerLibrary.id 和 MediaServerItem.tmdbid）",
       "v1.0.1": "修复媒体库类型匹配问题：支持中文类型名称（电影）",
       "v1.0.0": "初始版本：支持Emby媒体库质量监控、批量洗版订阅、定时扫描和通知推送"

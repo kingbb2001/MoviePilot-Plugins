@@ -27,7 +27,7 @@ class EmbyQualityMonitor(_PluginBase):
     # 插件元数据
     plugin_name = "Emby质量监控"
     plugin_desc = "监控Emby媒体库中的电影质量，自动识别不达标资源并批量创建洗版订阅"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "kalax"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/embyqualitymonitor.svg"
     plugin_order = 30
@@ -919,7 +919,7 @@ class EmbyQualityMonitor(_PluginBase):
                         self.__save_state()
                         
                 except Exception as e:
-                    logger.warning(f"扫描电影 {item.name} 失败: {e}")
+                    logger.warning(f"扫描电影 {item.title if hasattr(item, 'title') else item.item_id} 失败: {e}")
                     continue
             
             # 扫描完成
