@@ -27,7 +27,7 @@ class EmbyQualityMonitor(_PluginBase):
     # 插件元数据
     plugin_name = "Emby质量监控"
     plugin_desc = "监控Emby媒体库中的电影质量，自动识别不达标资源并批量创建洗版订阅"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "kalax"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/embyqualitymonitor.svg"
     plugin_order = 30
@@ -488,22 +488,35 @@ class EmbyQualityMonitor(_PluginBase):
     
     def get_page(self) -> List[dict]:
         """返回插件页面 - 显示扫描状态和结果"""
-        # 状态映射
-        status_text = {
-            "idle": "等待扫描",
-            "scanning": "正在扫描中...",
-            "completed": "扫描已完成",
-            "error": "扫描出错"
-        }
-        
-        status_color = {
-            "idle": "info",
-            "scanning": "warning",
-            "completed": "success",
-            "error": "error"
-        }
-        
-        return [
+        try:
+            # 状态映射
+            status_text = {
+                "idle": "等待扫描",
+                "scanning": "正在扫描中...",
+                "completed": "扫描已完成",
+                "error": "扫描出错"
+            }
+            
+            status_color = {
+                "idle": "info",
+                "scanning": "warning",
+                "completed": "success",
+                "error": "error"
+            }
+            
+            # 准备扫描结果数据（确保可JSON序列化）
+            scan_results_display = []
+            for movie in self._scan_results[:50]:  # 最多显示50部
+                try:
+                    scan_results_display.append({
+                        "title": str(movie.get("title", "未知")),
+                        "year": str(movie.get("year", "")),
+                        "issues": [str(issue) for issue in movie.get("issues", [])]
+                    })
+                except Exception as e:
+                    logger.debug(f"处理扫描结果项失败: {e}")
+            
+            return [
             # 状态卡片
             {
                 'component': 'VCard',
@@ -589,7 +602,7 @@ class EmbyQualityMonitor(_PluginBase):
             {
                 'component': 'VCard',
                 'props': {
-                    'v-if': len(self._scan_results) > 0,
+                    'v-if': len(scan_results_display) > 0,
                     'class': 'mb-4'
                 },
                 'content': [
@@ -630,7 +643,7 @@ class EmbyQualityMonitor(_PluginBase):
                                     {
                                         'component': 'VListItem',
                                         'props': {
-                                            'v-for': f'(movie, index) in {json.dumps(self._scan_results[:50])}',  # 最多显示50部
+                                            'v-for': f'(movie, index) in {json.dumps(scan_results_display)}',
                                             'key': 'index'
                                         },
                                         'content': [
@@ -716,6 +729,18 @@ class EmbyQualityMonitor(_PluginBase):
                 ]
             }
         ]
+        except Exception as e:
+            logger.error(f"生成插件页面失败: {e}", exc_info=True)
+            return [
+                {
+                    'component': 'VAlert',
+                    'props': {
+                        'type': 'error',
+                        'variant': 'tonal'
+                    },
+                    'text': f'页面加载失败：{str(e)}'
+                }
+            ]
     
     def stop_service(self):
         """停止插件服务"""
@@ -911,7 +936,7 @@ class EmbyQualityMonitor(_PluginBase):
                             "year": item_info.year,
                             "tmdb_id": item_info.tmdbid,
                             "item_id": item.item_id,
-                            "current_quality": quality_info,
+                            "current_quality": quality_info.to_dict() if hasattr(quality_info, 'to_dict') else str(quality_info),
                             "issues": issues
                         }
                         self._scan_results.append(movie_data)
