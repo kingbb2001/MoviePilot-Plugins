@@ -27,7 +27,7 @@ class EmbyQualityMonitor(_PluginBase):
     # 插件元数据
     plugin_name = "Emby质量监控"
     plugin_desc = "监控Emby媒体库中的电影质量，自动识别不达标资源并批量创建洗版订阅"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "kalax"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/embyqualitymonitor.svg"
     plugin_order = 30
@@ -880,7 +880,7 @@ class EmbyQualityMonitor(_PluginBase):
             
             # 先获取所有电影，计算总数
             logger.info(f"开始扫描媒体库: {self._library_name}")
-            all_items = list(self.emby_instance.get_items(parent=target_library.item_id))
+            all_items = list(self.emby_instance.get_items(parent=target_library.id))
             total_count = len(all_items)
             
             self._scan_progress["total"] = total_count
@@ -907,9 +907,9 @@ class EmbyQualityMonitor(_PluginBase):
                     
                     if issues:
                         movie_data = {
-                            "title": item_info.name,
+                            "title": item_info.title,
                             "year": item_info.year,
-                            "tmdb_id": item_info.tmdb_id,
+                            "tmdb_id": item_info.tmdbid,
                             "item_id": item.item_id,
                             "current_quality": quality_info,
                             "issues": issues
@@ -1002,11 +1002,12 @@ class EmbyQualityMonitor(_PluginBase):
             
             for library in libraries:
                 # 只返回电影类型的媒体库
-                if library.collection_type == "movies":
+                lib_type = library.type if hasattr(library, 'type') else None
+                if lib_type and lib_type.lower() in ['movies', 'movie', '电影']:
                     library_list.append({
                         "name": library.name,
-                        "item_id": library.item_id,
-                        "type": library.collection_type
+                        "id": library.id,
+                        "type": lib_type
                     })
             
             return {
