@@ -765,8 +765,8 @@ class EmbyQualityMonitor(_PluginBase):
                 
                 logger.info(f"媒体库: {lib_name}, 类型: {lib_type}, ID: {lib_id}")
                 
-                # 只缓存电影类型的媒体库
-                if lib_type and lib_type.lower() in ['movies', 'movie']:
+                # 只缓存电影类型的媒体库（支持中英文类型名称）
+                if lib_type and lib_type.lower() in ['movies', 'movie', '电影']:
                     movie_libraries.append({
                         'name': lib_name,
                         'id': lib_id
