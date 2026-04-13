@@ -27,7 +27,7 @@ class EmbyQualityMonitor(_PluginBase):
     # 插件元数据
     plugin_name = "Emby质量监控"
     plugin_desc = "监控Emby媒体库中的电影质量，自动识别不达标资源并批量创建洗版订阅"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "kalax"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/embyqualitymonitor.svg"
     plugin_order = 30
@@ -487,217 +487,278 @@ class EmbyQualityMonitor(_PluginBase):
         }
     
     def get_page(self) -> List[dict]:
-        """返回插件页面 - 显示扫描状态和结果"""
-        try:
-            # 调试：输出扫描结果数量
-            logger.info(f"生成页面，扫描结果数量: {len(self._scan_results)}, 状态: {self._scan_status}")
-            
-            # 状态映射
-            status_text = {
+        """返回插件页面 - 使用 VDataTable 显示扫描结果（通过 varspec+scripts 动态更新）"""
+        # 静态状态颜色（用于初始值）
+        status_color_init = {
+            "idle": "info",
+            "scanning": "warning",
+            "completed": "success",
+            "error": "error"
+        }
+
+        return [
+            # ===== 顶部状态栏（4个指标卡片） =====
+            {
+                'component': 'VRow',
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12, 'md': 3},
+                        'content': [{
+                            'component': 'VCard',
+                            'props': {'variant': 'outlined'},
+                            'content': [{
+                                'component': 'VCardText',
+                                'content': [
+                                    {'component': 'div', 'props': {'class': 'text-h5 text-center font-weight-bold text-error'}, 'text': '{{unqualified_count}}'},
+                                    {'component': 'div', 'props': {'class': 'text-caption text-center'}, 'text': '不达标电影'}
+                                ]
+                            }]
+                        }]
+                    },
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12, 'md': 3},
+                        'content': [{
+                            'component': 'VCard',
+                            'props': {'variant': 'outlined'},
+                            'content': [{
+                                'component': 'VCardText',
+                                'content': [
+                                    {'component': 'div', 'props': {'class': 'text-h5 text-center font-weight-bold'}, 'text': '{{total_count}}'},
+                                    {'component': 'div', 'props': {'class': 'text-caption text-center'}, 'text': '总电影数'}
+                                ]
+                            }]
+                        }]
+                    },
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12, 'md': 3},
+                        'content': [{
+                            'component': 'VCard',
+                            'props': {'variant': 'outlined'},
+                            'content': [{
+                                'component': 'VCardText',
+                                'content': [
+                                    {'component': 'div', 'props': {'class': 'text-center'}},
+                                    {'component': 'VProgressCircular', 'props': {'model': 'scan_progress_pct', 'size': '50', 'width': '4', 'color': 'primary'}},
+                                    {'component': 'div', 'props': {'class': 'text-caption text-center mt-1'}, 'text': '{{scan_progress_text}}'}
+                                ]
+                            }]
+                        }]
+                    },
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12, 'md': 3},
+                        'content': [{
+                            'component': 'VCard',
+                            'props': {'variant': 'outlined'},
+                            'content': [{
+                                'component': 'VCardText',
+                                'content': [
+                                    {'component': 'VAlert', 'props': {'type': status_color_init.get(self._scan_status, 'info'), 'variant': 'tonal', 'density': 'compact', 'class': 'mb-2'}, 'text': '{{scan_status_text}}'},
+                                    {'component': 'div', 'props': {'class': 'text-caption text-center', 'style': 'color: #999'}, 'text': '{{last_scan_time_text}}'}
+                                ]
+                            }]
+                        }]
+                    }
+                ]
+            },
+
+            # ===== 操作按钮行 =====
+            {
+                'component': 'VRow',
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12},
+                        'content': [
+                            {
+                                'component': 'VBtn',
+                                'props': {
+                                    'color': 'primary', 'variant': 'elevated', 'class': 'mr-2',
+                                    'onclick': 'startScan()', 'loading': 'scanning'
+                                },
+                                'text': '{{ scanning ? "扫描中..." : "立即扫描" }}'
+                            },
+                            {
+                                'component': 'VBtn',
+                                'props': {
+                                    'color': 'error', 'variant': 'outlined', 'class': 'mr-2',
+                                    'onclick': 'batchSubscribe()', 'disabled': 'selected_items.length === 0'
+                                },
+                                'text': '批量订阅 (已选 {{selected_items.length}} 项)'
+                            },
+                            {'component': 'VSpacer'},
+                            {
+                                'component': 'VSelect',
+                                'props': {
+                                    'model': 'filter_status',
+                                    'items': [
+                                        {'title': '全部', 'value': 'all'},
+                                        {'title': '仅不达标', 'value': 'below'}
+                                    ],
+                                    'density': 'compact', 'hide-details': True,
+                                    'style': 'max-width: 150px'
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+
+            # ===== 结果表格 =====
+            {
+                'component': 'VRow',
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12},
+                        'content': [
+                            {
+                                'component': 'VAlert',
+                                'props': {'type': 'info', 'variant': 'tonal', 'class': 'mb-3'},
+                                'text': '{{result_tip}}'
+                            },
+                            {
+                                'component': 'VDataTable',
+                                'props': {
+                                    'headers': [
+                                        {'title': '电影名称', 'key': 'title', 'sortable': True},
+                                        {'title': '年份', 'key': 'year', 'sortable': True, 'width': '80px'},
+                                        {'title': '当前质量', 'key': 'quality_summary', 'sortable': False},
+                                        {'title': '不达标原因', 'key': 'issues_text', 'sortable': False},
+                                        {'title': '操作', 'key': 'actions', 'sortable': False, 'width': '100px'}
+                                    ],
+                                    'items': 'scan_results',
+                                    'items_per_page': 20,
+                                    'show_select': True,
+                                    'v_model': 'selected_items',
+                                    'return-object': True
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+
+    def get_page_varspec(self) -> Dict[str, Tuple]:
+        """定义页面变量规格 - 供前端 updatePageVars 使用"""
+        return {
+            'scanning': (bool, False),
+            'scan_status': (str, self._scan_status),
+            'scan_status_text': (str, '等待扫描'),
+            'scan_progress_pct': (int, 0),
+            'scan_progress_text': (str, '0/0'),
+            'unqualified_count': (int, 0),
+            'total_count': (int, 0),
+            'last_scan_time_text': (str, '从未扫描'),
+            'scan_results': (list, []),
+            'selected_items': (list, []),
+            'filter_status': (str, 'all'),
+            'result_tip': (str, '点击"立即扫描"开始分析Emby媒体库'),
+        }
+
+    def get_page_scripts(self) -> List[str]:
+        """页面脚本 - 负责从API获取数据并更新页面变量"""
+        return [
+            '''
+async function loadStatus() {
+    try {
+        const resp = await fetch("/api/embyqualitymonitor/status");
+        const data = await resp.json();
+        if (data.success) {
+            const d = data.data;
+            const pct = (d.progress && d.progress.total > 0)
+                ? Math.round(d.progress.current / d.progress.total * 100) : 0;
+            const statusTextMap = {
                 "idle": "等待扫描",
                 "scanning": "正在扫描中...",
                 "completed": "扫描已完成",
                 "error": "扫描出错"
+            };
+            let timeText = "从未扫描";
+            if (d.last_scan_time) {
+                const t = new Date(d.last_scan_time);
+                timeText = t.toLocaleString("zh-CN");
             }
-            
-            status_color = {
-                "idle": "info",
-                "scanning": "warning",
-                "completed": "success",
-                "error": "error"
-            }
-            
-            # 准备扫描结果数据（确保可JSON序列化）
-            scan_results_display = []
-            for movie in self._scan_results[:50]:  # 最多显示50部
-                try:
-                    scan_results_display.append({
-                        "title": str(movie.get("title", "未知")),
-                        "year": str(movie.get("year", "")),
-                        "issues": [str(issue) for issue in movie.get("issues", [])]
-                    })
-                except Exception as e:
-                    logger.debug(f"处理扫描结果项失败: {e}")
-            
-            logger.info(f"准备显示 {len(scan_results_display)} 部电影")
-            
-            # 构建页面组件
-            page_components = []
-            
-            # 1. 状态卡片
-            page_components.append({
-                'component': 'VCard',
-                'props': {
-                    'class': 'mb-4'
-                },
-                'content': [
-                    {
-                        'component': 'VCardTitle',
-                        'text': '扫描状态'
-                    },
-                    {
-                        'component': 'VCardText',
-                        'content': [
-                            {
-                                'component': 'VAlert',
-                                'props': {
-                                    'type': status_color.get(self._scan_status, 'info'),
-                                    'variant': 'tonal',
-                                    'class': 'mb-3'
-                                },
-                                'text': status_text.get(self._scan_status, '未知状态')
-                            }
-                        ]
-                    }
-                ]
-            })
-            
-            # 2. 结果卡片（如果有结果）
-            if len(scan_results_display) > 0:
-                page_components.append({
-                    'component': 'VCard',
-                    'props': {
-                        'class': 'mb-4'
-                    },
-                'content': [
-                    {
-                        'component': 'VCardTitle',
-                        'props': {
-                            'class': 'd-flex align-center'
-                        },
-                        'content': [
-                            {
-                                'component': 'span',
-                                'text': '扫描结果'
-                            },
-                            {
-                                'component': 'VSpacer'
-                            },
-                            {
-                                'component': 'VChip',
-                                'props': {
-                                    'color': 'error',
-                                    'size': 'small'
-                                },
-                                'text': f"发现 {len(self._scan_results)} 部不达标电影"
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VCardText',
-                        'content': [
-                            # 电影列表
-                            {
-                                'component': 'VList',
-                                'props': {
-                                    'lines': 'two',
-                                    'density': 'compact'
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VListItem',
-                                        'props': {
-                                            'v-for': f'(movie, index) in {json.dumps(scan_results_display)}',
-                                            'key': 'index'
-                                        },
-                                        'content': [
-                                            {
-                                                'component': 'VListItemTitle',
-                                                'text': '{{ movie.title }} ({{ movie.year }})'
-                                            },
-                                            {
-                                                'component': 'VListItemSubtitle',
-                                                'content': [
-                                                    {
-                                                        'component': 'VChip',
-                                                        'props': {
-                                                            'v-for': '(issue, i) in movie.issues',
-                                                            'key': 'i',
-                                                            'size': 'x-small',
-                                                            'color': 'warning',
-                                                            'class': 'mr-1 mt-1'
-                                                        },
-                                                        'text': '{{ issue }}'
-                                                    }
-                                                ]
-                                            }
-                                        ]
-                                    }
-                                ]
-                            },
-                            
-                            # 提示信息
-                            {
-                                'component': 'div',
-                                'props': {
-                                    'v-if': len(self._scan_results) > 50,
-                                    'class': 'text-caption text-center mt-3'
-                                },
-                                'text': f"仅显示前50部，共 {len(self._scan_results)} 部"
-                            }
-                        ]
-                    }
-                ]
-            })
-            
-            # 3. 操作提示
-            page_components.append({
-                'component': 'VAlert',
-                'props': {
-                    'type': 'info',
-                    'variant': 'tonal'
-                },
-                'content': [
-                    {
-                        'component': 'div',
-                        'text': '💡 操作提示：'
-                    },
-                    {
-                        'component': 'div',
-                        'text': '1. 在"设置"页面配置Emby服务器和媒体库',
-                        'props': {
-                            'class': 'mt-1'
-                        }
-                    },
-                    {
-                        'component': 'div',
-                        'text': '2. 保存配置后插件会自动扫描',
-                        'props': {
-                            'class': 'mt-1'
-                        }
-                    },
-                    {
-                        'component': 'div',
-                        'text': '3. 扫描结果会在上方显示',
-                        'props': {
-                            'class': 'mt-1'
-                        }
-                    },
-                    {
-                        'component': 'div',
-                        'text': '4. 刷新页面可查看最新状态',
-                        'props': {
-                            'class': 'mt-1'
-                        }
-                    }
-                ]
-            })
-            
-            
-            return page_components
-        except Exception as e:
-            logger.error(f"生成插件页面失败: {e}", exc_info=True)
-            return [
-                {
-                    'component': 'VAlert',
-                    'props': {
-                        'type': 'error',
-                        'variant': 'tonal'
-                    },
-                    'text': f'页面加载失败：{str(e)}'
-                }
-            ]
-    
+            updatePageVars({
+                scanning: d.status === "scanning",
+                scan_status: d.status,
+                scan_status_text: statusTextMap[d.status] || d.status,
+                scan_progress_pct: pct,
+                scan_progress_text: (d.progress ? d.progress.current + "/" + d.progress.total : "0/0"),
+                unqualified_count: d.total_count || 0,
+                total_count: d.progress ? d.progress.total : 0,
+                last_scan_time_text: timeText,
+                scan_results: d.results || [],
+                result_tip: (d.results && d.results.length > 0)
+                    ? ("共发现 " + d.results.length + " 部不达标电影，可勾选后批量订阅")
+                    : (d.status === "completed"
+                        ? "太棒了！所有电影都达标！"
+                        : "点击"立即扫描"开始分析Emby媒体库")
+            });
+        }
+    } catch (e) {
+        console.error("加载状态失败:", e);
+    }
+}
+
+async function startScan() {
+    try {
+        updatePageVars({ scanning: true, scan_status: "scanning", scan_status_text: "正在扫描中...", result_tip: "正在扫描，请稍候..." });
+        const resp = await fetch("/api/embyqualitymonitor/scan", { method: "POST" });
+        const data = await resp.json();
+        if (data.success) {
+            pollStatus();
+        } else {
+            updatePageVars({ scanning: false, scan_status: "error", scan_status_text: "扫描启动失败" });
+            alert(data.message || "扫描启动失败");
+        }
+    } catch (e) {
+        updatePageVars({ scanning: false, scan_status: "error", scan_status_text: "扫描失败" });
+        alert("扫描失败: " + e.message);
+    }
+}
+
+let pollTimer = null;
+function pollStatus() {
+    clearTimeout(pollTimer);
+    loadStatus().then(() => {
+        if (window.scanning) {
+            pollTimer = setTimeout(pollStatus, 2000);
+        }
+    });
+}
+
+async function batchSubscribe() {
+    const items = window.selected_items || [];
+    if (items.length === 0) { alert("请先选择要订阅的电影"); return; }
+    if (!confirm("确定要为选中的 " + items.length + " 部电影创建洗版订阅吗？")) { return; }
+    try {
+        const resp = await fetch("/api/embyqualitymonitor/subscribe_batch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ items: items.map(i => ({ tmdbid: i.tmdbid, title: i.title })) })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            alert("成功创建 " + data.data.count + " 个订阅！");
+            updatePageVars({ selected_items: [] });
+        } else {
+            alert("订阅失败: " + (data.message || "未知错误"));
+        }
+    } catch (e) {
+        alert("订阅失败: " + e.message);
+    }
+}
+
+// 页面加载时自动获取最新状态
+loadStatus();
+'''
+        ]
+
     def stop_service(self):
         """停止插件服务"""
         if self._scheduler:
@@ -957,12 +1018,38 @@ class EmbyQualityMonitor(_PluginBase):
     
     def api_get_status(self):
         """API: 获取当前扫描状态"""
+        # 格式化扫描结果，供前端表格使用
+        formatted_results = []
+        for movie in self._scan_results:
+            try:
+                quality_info = movie.get("current_quality") or {}
+                if isinstance(quality_info, dict):
+                    quality_summary = " ".join(filter(None, [
+                        quality_info.get("resolution", ""),
+                        quality_info.get("codec", "").upper(),
+                        quality_info.get("hdr", ""),
+                        quality_info.get("source", "")
+                    ])) or "未知"
+                else:
+                    quality_summary = str(quality_info)
+                formatted_results.append({
+                    "title": movie.get("title", "未知"),
+                    "year": movie.get("year", ""),
+                    "tmdbid": movie.get("tmdbid") or movie.get("tmdb_id"),
+                    "item_id": movie.get("item_id"),
+                    "quality_summary": quality_summary,
+                    "issues_text": " | ".join(movie.get("issues", [])),
+                    "issues": movie.get("issues", []),
+                })
+            except Exception as e:
+                logger.debug(f"格式化扫描结果失败: {e}")
+
         return {
             "success": True,
             "data": {
                 "status": self._scan_status,
                 "progress": self._scan_progress,
-                "results": self._scan_results,
+                "results": formatted_results,
                 "error": self._scan_error,
                 "last_scan_time": self._last_scan_time,
                 "total_count": len(self._scan_results)
@@ -1005,14 +1092,69 @@ class EmbyQualityMonitor(_PluginBase):
             }
     
     def api_scan(self):
-        """API: 扫描媒体库"""
-        results = self.scan_library()
+        """API: 触发后台扫描（立即返回，前端通过 /status 轮询进度）"""
+        import threading
+        # 已处于扫描中则直接返回
+        if self._scan_status == "scanning":
+            return {
+                "success": False,
+                "message": "扫描已在进行中，请勿重复触发"
+            }
+        # 后台启动扫描，避免阻塞 HTTP 请求
+        thread = threading.Thread(target=self.scan_library_background, daemon=True)
+        thread.start()
         return {
             "success": True,
-            "data": results,
-            "message": f"扫描完成，发现 {len(results)} 部电影质量不达标"
+            "message": "扫描已启动，请在页面查看进度"
         }
     
+    def api_subscribe_batch(self):
+        """API: 批量订阅选中的不达标电影"""
+        from flask import request
+        try:
+            body = request.get_json(silent=True) or {}
+            items = body.get("items") or []
+        except Exception:
+            items = []
+
+        if not items:
+            return {"success": False, "message": "未提供电影列表"}
+
+        subscribe_chain = SubscribeChain()
+        success_count = 0
+        failed_count = 0
+
+        for movie in items:
+            tmdb_id = movie.get("tmdbid") or movie.get("tmdb_id")
+            title = movie.get("title")
+            year = movie.get("year")
+            if not title:
+                failed_count += 1
+                continue
+            try:
+                result = subscribe_chain.add_subscribe(
+                    mtype=MediaType.MOVIE,
+                    title=title,
+                    year=year,
+                    tmdbid=tmdb_id,
+                    best_version=True,
+                    username="embyqualitymonitor"
+                )
+                if result:
+                    success_count += 1
+                    logger.info(f"订阅成功: {title} ({year})")
+                else:
+                    failed_count += 1
+            except Exception as e:
+                failed_count += 1
+                logger.warning(f"订阅失败 {title}: {e}")
+
+        return {
+            "success": True,
+            "data": {"count": success_count, "failed": failed_count},
+            "message": f"成功创建 {success_count} 个订阅，{failed_count} 个失败"
+        }
+
     def api_subscribe(self, movies: List[Dict[str, Any]] = None):
         """API: 批量创建订阅"""
         if not movies:
