@@ -60,7 +60,7 @@
     "description": "监控Emby媒体库中的电影质量，自动识别不达标资源并批量创建MP洗版订阅",
     "labels": "洗板,质量,Emby,监控",
     "version": "1.0.0",
-    "icon": "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/emby_quality_monitor.svg",
+    "icon": "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/embyqualitymonitor.svg",
     "author": "kingbb2001",
     "level": 2,
     "v2": true,
