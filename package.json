@@ -54,5 +54,18 @@
       "v1.1.0": "优化扫描逻辑：分批获取(每批500个)、结果持久化到JSON文件、支持断点续扫",
       "v1.0.0": "初始版本，支持Emby媒体质量检测、质量报告展示、手动/自动洗板订阅"
     }
+  },
+  "EmbyQualityMonitor": {
+    "name": "Emby质量监控",
+    "description": "监控Emby媒体库中的电影质量，自动识别不达标资源并批量创建MP洗版订阅",
+    "labels": "洗板,质量,Emby,监控",
+    "version": "1.0.0",
+    "icon": "quality_high",
+    "author": "kingbb2001",
+    "level": 2,
+    "v2": true,
+    "history": {
+      "v1.0.0": "初始版本：支持Emby媒体库质量监控、批量洗版订阅、定时扫描和通知推送"
+    }
   }
 }
