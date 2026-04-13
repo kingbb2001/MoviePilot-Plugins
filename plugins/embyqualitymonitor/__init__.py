@@ -53,6 +53,9 @@ class EmbyQualityMonitor(_PluginBase):
     # 质量检查器
     _checker = None
     
+    # 缓存媒体库列表
+    _cached_libraries = []
+    
     def init_plugin(self, config: dict = None):
         """初始化插件"""
         self.mediaserverhelper = MediaServerHelper()
@@ -106,6 +109,13 @@ class EmbyQualityMonitor(_PluginBase):
         """注册API接口"""
         return [
             {
+                "path": "/libraries",
+                "endpoint": self.api_get_libraries,
+                "methods": ["GET"],
+                "summary": "获取Emby媒体库列表",
+                "description": "获取指定Emby服务器的所有媒体库",
+            },
+            {
                 "path": "/scan",
                 "endpoint": self.api_scan,
                 "methods": ["GET"],
@@ -138,13 +148,13 @@ class EmbyQualityMonitor(_PluginBase):
         emby_servers = self.__get_emby_servers()
         
         return [
-            # 插件说明
+            # ===== 插件说明 =====
             {
                 'component': 'VAlert',
                 'props': {
                     'type': 'info',
                     'variant': 'tonal',
-                    'class': 'mb-4'
+                    'class': 'mb-6'
                 },
                 'content': [
                     {
@@ -153,14 +163,199 @@ class EmbyQualityMonitor(_PluginBase):
                     },
                     {
                         'component': 'div',
-                        'text': '工作流程：扫描媒体库 → 解析质量信息 → 质量判断 → 展示不达标列表 → 批量创建订阅',
+                        'text': '工作流程：配置服务器 → 选择媒体库 → 扫描质量 → 选择电影 → 批量订阅',
                         'props': {
-                            'class': 'mt-2'
+                            'class': 'mt-2 text-caption'
                         }
                     }
                 ]
             },
-            # 重要提示：MP整理覆盖模式配置
+            
+            # ===== 基础配置卡片 =====
+            {
+                'component': 'VCard',
+                'props': {
+                    'class': 'mb-4'
+                },
+                'content': [
+                    {
+                        'component': 'VCardTitle',
+                        'props': {
+                            'class': 'text-h6 pb-0'
+                        },
+                        'text': '基础配置'
+                    },
+                    {
+                        'component': 'VCardText',
+                        'content': [
+                            {
+                                'component': 'VSwitch',
+                                'props': {
+                                    'model': 'enabled',
+                                    'label': '启用插件',
+                                    'class': 'mb-2'
+                                }
+                            },
+                            {
+                                'component': 'VSwitch',
+                                'props': {
+                                    'model': 'notify',
+                                    'label': '开启通知',
+                                    'class': 'mb-2'
+                                }
+                            },
+                            {
+                                'component': 'VTextField',
+                                'props': {
+                                    'model': 'cron',
+                                    'label': '定时扫描周期（Cron格式）',
+                                    'placeholder': '0 2 * * *（每天凌晨2点）',
+                                    'hint': '留空则不启用定时扫描',
+                                    'persistentHint': True,
+                                    'class': 'mb-2'
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            
+            # ===== Emby配置卡片 =====
+            {
+                'component': 'VCard',
+                'props': {
+                    'class': 'mb-4'
+                },
+                'content': [
+                    {
+                        'component': 'VCardTitle',
+                        'props': {
+                            'class': 'text-h6 pb-0'
+                        },
+                        'text': 'Emby服务器配置'
+                    },
+                    {
+                        'component': 'VCardText',
+                        'content': [
+                            {
+                                'component': 'VSelect',
+                                'props': {
+                                    'model': 'emby_name',
+                                    'label': 'Emby服务器',
+                                    'items': emby_servers,
+                                    'itemTitle': 'title',
+                                    'itemValue': 'value',
+                                    'hint': '选择MP中已配置的Emby服务器',
+                                    'persistentHint': True,
+                                    'class': 'mb-3'
+                                }
+                            },
+                            {
+                                'component': 'VTextField',
+                                'props': {
+                                    'model': 'library_name',
+                                    'label': '媒体库名称',
+                                    'placeholder': '电影',
+                                    'hint': '输入要监控的Emby媒体库名称（如：电影、动画电影等）',
+                                    'persistentHint': True
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            
+            # ===== 质量标准卡片 =====
+            {
+                'component': 'VCard',
+                'props': {
+                    'class': 'mb-4'
+                },
+                'content': [
+                    {
+                        'component': 'VCardTitle',
+                        'props': {
+                            'class': 'text-h6 pb-0'
+                        },
+                        'text': '质量标准'
+                    },
+                    {
+                        'component': 'VCardText',
+                        'content': [
+                            {
+                                'component': 'VRow',
+                                'content': [
+                                    {
+                                        'component': 'VCol',
+                                        'props': {
+                                            'cols': 12,
+                                            'md': 6
+                                        },
+                                        'content': [
+                                            {
+                                                'component': 'VSelect',
+                                                'props': {
+                                                    'model': 'min_resolution',
+                                                    'label': '最低分辨率',
+                                                    'items': [
+                                                        {'title': '720p', 'value': '720p'},
+                                                        {'title': '1080p', 'value': '1080p'},
+                                                        {'title': '2160p (4K)', 'value': '2160p'},
+                                                    ],
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        'component': 'VCol',
+                                        'props': {
+                                            'cols': 12,
+                                            'md': 6
+                                        },
+                                        'content': [
+                                            {
+                                                'component': 'VSelect',
+                                                'props': {
+                                                    'model': 'min_source',
+                                                    'label': '最低来源',
+                                                    'items': [
+                                                        {'title': 'WEB-DL', 'value': 'WEB-DL'},
+                                                        {'title': 'BluRay', 'value': 'BluRay'},
+                                                        {'title': 'REMUX', 'value': 'REMUX'},
+                                                    ],
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VTextField',
+                                'props': {
+                                    'model': 'preferred_codecs',
+                                    'label': '优先编码（逗号分隔）',
+                                    'placeholder': 'h265,hevc,av1',
+                                    'hint': '视频编码优先级，从高到低排列',
+                                    'persistentHint': True,
+                                    'class': 'mt-3'
+                                }
+                            },
+                            {
+                                'component': 'VSwitch',
+                                'props': {
+                                    'model': 'require_hdr',
+                                    'label': '要求HDR',
+                                    'hint': '开启后，SDR资源将被标记为不达标',
+                                    'persistentHint': True,
+                                    'class': 'mt-2'
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            
+            # ===== 重要提示 =====
             {
                 'component': 'VAlert',
                 'props': {
@@ -187,7 +382,7 @@ class EmbyQualityMonitor(_PluginBase):
                                 'component': 'div',
                                 'text': '路径：MP设置 → 目录 → 整理模式 → 覆盖模式',
                                 'props': {
-                                    'class': 'mt-1'
+                                    'class': 'mt-1 text-caption'
                                 }
                             },
                             {
@@ -208,99 +403,18 @@ class EmbyQualityMonitor(_PluginBase):
                     }
                 ]
             },
-            {
-                'component': 'VSwitch',
-                'props': {
-                    'model': 'enabled',
-                    'label': '启用插件',
-                }
-            },
-            {
-                'component': 'VSelect',
-                'props': {
-                    'model': 'emby_name',
-                    'label': 'Emby服务器',
-                    'items': emby_servers,
-                    'itemTitle': 'title',
-                    'itemValue': 'value',
-                }
-            },
-            {
-                'component': 'VTextField',
-                'props': {
-                    'model': 'library_name',
-                    'label': '媒体库名称',
-                    'placeholder': '电影',
-                }
-            },
-            {
-                'component': 'VSelect',
-                'props': {
-                    'model': 'min_resolution',
-                    'label': '最低分辨率',
-                    'items': [
-                        {'title': '720p', 'value': '720p'},
-                        {'title': '1080p', 'value': '1080p'},
-                        {'title': '2160p (4K)', 'value': '2160p'},
-                    ],
-                }
-            },
-            {
-                'component': 'VTextField',
-                'props': {
-                    'model': 'preferred_codecs',
-                    'label': '优先编码（逗号分隔）',
-                    'placeholder': 'h265,hevc,av1',
-                }
-            },
-            {
-                'component': 'VSelect',
-                'props': {
-                    'model': 'min_source',
-                    'label': '最低来源',
-                    'items': [
-                        {'title': 'WEB-DL', 'value': 'WEB-DL'},
-                        {'title': 'BluRay', 'value': 'BluRay'},
-                        {'title': 'REMUX', 'value': 'REMUX'},
-                    ],
-                }
-            },
-            {
-                'component': 'VSwitch',
-                'props': {
-                    'model': 'require_hdr',
-                    'label': '要求HDR',
-                }
-            },
-            {
-                'component': 'VSwitch',
-                'props': {
-                    'model': 'delete_old',
-                    'label': '自动删除旧版本',
-                }
-            },
-            {
-                'component': 'VTextField',
-                'props': {
-                    'model': 'cron',
-                    'label': '定时扫描周期（Cron格式）',
-                    'placeholder': '0 2 * * *',
-                }
-            },
-            {
-                'component': 'VSwitch',
-                'props': {
-                    'model': 'notify',
-                    'label': '开启通知',
-                }
-            },
+            
+            # ===== 立即运行 =====
             {
                 'component': 'VSwitch',
                 'props': {
                     'model': 'onlyonce',
                     'label': '立即运行一次',
+                    'hint': '保存配置后立即扫描一次媒体库',
+                    'persistentHint': True,
+                    'class': 'mb-4'
                 }
-            },
+            }
         ], {
             "enabled": self._enabled,
             "emby_name": self._emby_name,
@@ -316,8 +430,279 @@ class EmbyQualityMonitor(_PluginBase):
         }
     
     def get_page(self) -> List[dict]:
-        """返回插件页面"""
-        pass
+        """返回插件页面 - 质量监控交互界面"""
+        # 获取可用的Emby服务器列表
+        emby_servers = self.__get_emby_servers()
+        
+        return [
+            # 页面标题
+            {
+                'component': 'VCard',
+                'props': {
+                    'class': 'mb-4'
+                },
+                'content': [
+                    {
+                        'component': 'VCardTitle',
+                        'props': {
+                            'class': 'text-h5'
+                        },
+                        'text': 'Emby质量监控'
+                    },
+                    {
+                        'component': 'VCardSubtitle',
+                        'text': '扫描Emby媒体库，识别质量不达标的资源并批量创建洗版订阅'
+                    }
+                ]
+            },
+            
+            # 扫描控制面板
+            {
+                'component': 'VCard',
+                'props': {
+                    'class': 'mb-4'
+                },
+                'content': [
+                    {
+                        'component': 'VCardTitle',
+                        'props': {
+                            'class': 'text-h6 pb-0'
+                        },
+                        'text': '扫描设置'
+                    },
+                    {
+                        'component': 'VCardText',
+                        'content': [
+                            {
+                                'component': 'VRow',
+                                'content': [
+                                    {
+                                        'component': 'VCol',
+                                        'props': {
+                                            'cols': 12,
+                                            'md': 6
+                                        },
+                                        'content': [
+                                            {
+                                                'component': 'VSelect',
+                                                'props': {
+                                                    'model': 'scan_emby_server',
+                                                    'label': '选择Emby服务器',
+                                                    'items': emby_servers,
+                                                    'itemTitle': 'title',
+                                                    'itemValue': 'value',
+                                                    'variant': 'outlined',
+                                                    'density': 'compact'
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        'component': 'VCol',
+                                        'props': {
+                                            'cols': 12,
+                                            'md': 6
+                                        },
+                                        'content': [
+                                            {
+                                                'component': 'VSelect',
+                                                'props': {
+                                                    'model': 'scan_library',
+                                                    'label': '选择媒体库',
+                                                    'items': [],
+                                                    'itemTitle': 'name',
+                                                    'itemValue': 'name',
+                                                    'variant': 'outlined',
+                                                    'density': 'compact',
+                                                    'hint': '请先选择Emby服务器',
+                                                    'persistentHint': True
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VBtn',
+                                'props': {
+                                    'color': 'primary',
+                                    'block': True,
+                                    'size': 'large',
+                                    'class': 'mt-4'
+                                },
+                                'text': '开始扫描',
+                                'events': {
+                                    'click': {
+                                        'action': 'scan_library'
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            
+            # 扫描结果区域
+            {
+                'component': 'VCard',
+                'props': {
+                    'class': 'mb-4',
+                                    'v-if': 'scan_results && scan_results.length > 0'
+                },
+                'content': [
+                    {
+                        'component': 'VCardTitle',
+                        'props': {
+                            'class': 'd-flex align-center pb-0'
+                        },
+                        'content': [
+                            {
+                                'component': 'span',
+                                'text': '扫描结果'
+                            },
+                            {
+                                'component': 'VSpacer'
+                            },
+                            {
+                                'component': 'VChip',
+                                'props': {
+                                    'color': 'error',
+                                    'size': 'small'
+                                },
+                                'text': '发现 {{ scan_results.length }} 部不达标电影'
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VCardText',
+                        'content': [
+                            # 操作按钮
+                            {
+                                'component': 'VRow',
+                                'props': {
+                                    'class': 'mb-4'
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VCol',
+                                        'content': [
+                                            {
+                                                'component': 'VBtn',
+                                                'props': {
+                                                    'color': 'primary',
+                                                    'variant': 'outlined',
+                                                    'size': 'small'
+                                                },
+                                                'text': '全选',
+                                                'events': {
+                                                    'click': {
+                                                        'action': 'select_all'
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        'component': 'VCol',
+                                        'content': [
+                                            {
+                                                'component': 'VBtn',
+                                                'props': {
+                                                    'color': 'secondary',
+                                                    'variant': 'outlined',
+                                                    'size': 'small'
+                                                },
+                                                'text': '取消全选',
+                                                'events': {
+                                                    'click': {
+                                                        'action': 'deselect_all'
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        'component': 'VCol',
+                                        'props': {
+                                            'cols': 'auto'
+                                        },
+                                        'content': [
+                                            {
+                                                'component': 'VBtn',
+                                                'props': {
+                                                    'color': 'success',
+                                                    'size': 'small'
+                                                },
+                                                'text': '批量订阅 ({{ selected_count }})',
+                                                'events': {
+                                                    'click': {
+                                                        'action': 'batch_subscribe'
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            
+                            # 电影列表
+                            {
+                                'component': 'VList',
+                                'props': {
+                                    'lines': 'two'
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VListItem',
+                                        'props': {
+                                            'v-for': '(movie, index) in scan_results',
+                                            'key': 'index',
+                                            'value': 'movie.selected'
+                                        },
+                                        'content': [
+                                            {
+                                                'component': 'template',
+                                                'props': {
+                                                    'v-slot:prepend': True
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VCheckbox',
+                                                        'props': {
+                                                            'model': 'movie.selected'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VListItemTitle',
+                                                'text': '{{ movie.title }} ({{ movie.year }})'
+                                            },
+                                            {
+                                                'component': 'VListItemSubtitle',
+                                                'content': [
+                                                    {
+                                                        'component': 'VChip',
+                                                        'props': {
+                                                            'v-for': '(issue, i) in movie.issues',
+                                                            'key': 'i',
+                                                            'size': 'x-small',
+                                                            'color': 'warning',
+                                                            'class': 'mr-1'
+                                                        },
+                                                        'text': '{{ issue }}'
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
     
     def stop_service(self):
         """停止插件服务"""
@@ -463,6 +848,40 @@ class EmbyQualityMonitor(_PluginBase):
             title=title,
             text=text
         )
+    
+    def api_get_libraries(self):
+        """API: 获取Emby媒体库列表"""
+        if not self.emby_instance:
+            return {
+                "success": False,
+                "message": "Emby实例未配置或不可用，请先选择Emby服务器"
+            }
+        
+        try:
+            libraries = self.emby_instance.get_librarys()
+            library_list = []
+            
+            for library in libraries:
+                # 只返回电影类型的媒体库
+                if library.collection_type == "movies":
+                    library_list.append({
+                        "name": library.name,
+                        "item_id": library.item_id,
+                        "type": library.collection_type
+                    })
+            
+            return {
+                "success": True,
+                "data": library_list,
+                "message": f"找到 {len(library_list)} 个电影媒体库"
+            }
+            
+        except Exception as e:
+            logger.error(f"获取媒体库列表失败: {e}")
+            return {
+                "success": False,
+                "message": f"获取媒体库失败: {str(e)}"
+            }
     
     def api_scan(self):
         """API: 扫描媒体库"""
