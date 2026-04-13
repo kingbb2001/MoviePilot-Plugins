@@ -27,7 +27,7 @@ class EmbyQualityMonitor(_PluginBase):
     # 插件元数据
     plugin_name = "Emby质量监控"
     plugin_desc = "监控Emby媒体库中的电影质量，自动识别不达标资源并批量创建洗版订阅"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     plugin_author = "kalax"
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/embyqualitymonitor.svg"
     plugin_order = 30
@@ -638,49 +638,6 @@ class EmbyQualityMonitor(_PluginBase):
                         ]
                     }
                 ]
-            },
-            
-            # 操作提示
-            {
-                'component': 'VAlert',
-                'props': {
-                    'type': 'info',
-                    'variant': 'tonal'
-                },
-                'content': [
-                    {
-                        'component': 'div',
-                        'text': '💡 操作提示：'
-                    },
-                    {
-                        'component': 'div',
-                        'text': '1. 在"设置"页面配置Emby服务器和媒体库',
-                        'props': {
-                            'class': 'mt-1'
-                        }
-                    },
-                    {
-                        'component': 'div',
-                        'text': '2. 保存配置后插件会自动扫描',
-                        'props': {
-                            'class': 'mt-1'
-                        }
-                    },
-                    {
-                        'component': 'div',
-                        'text': '3. 扫描结果会在上方显示',
-                        'props': {
-                            'class': 'mt-1'
-                        }
-                    },
-                    {
-                        'component': 'div',
-                        'text': '4. 刷新页面可查看最新状态',
-                        'props': {
-                            'class': 'mt-1'
-                        }
-                    }
-                ]
             })
             
             # 3. 操作提示
@@ -725,6 +682,7 @@ class EmbyQualityMonitor(_PluginBase):
                     }
                 ]
             })
+            
             
             return page_components
         except Exception as e:
