@@ -1,6 +1,6 @@
 ﻿"""
 影巢签到插件
-版本: 2.4.6
+版本: 2.4.7
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,9 +10,9 @@
 - 默认使用代理访问
 
 修改记录:
-- v2.4.6: 修复签到API"请求签名缺失"：_signin_base改为多CSRF策略轮询尝试
-  （x-csrf-token/hdh_sa_token + x-nextjs-csrf），覆盖Next.js Server Action
-  CSRF和传统CSRF两种模式；401/403时输出完整响应体(前1000字符)便于定位问题
+- v2.4.7: 重写_signin_base请求逻辑：每次requests.post()加try-except捕获具体异常；
+  精简CSRF策略为3级（csrf_access_token → hdh_sa_token → 无CSRF）；
+  每次请求记录实际HTTP状态码和异常信息，彻底定位"返回None"根因
 - v2.4.5: 修复_extract_login_cookie只提取token和csrf_access_token导致遗漏签名cookie：
   改为捕获登录响应中所有Set-Cookie并完整组装；新增cookie键名日志输出方便排查；
   _warmup_session改用cloudscraper优先+多页面回退（首页→登录页）避免SSL/CF拦截；
@@ -74,7 +74,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.4.6"
+    plugin_version = "2.4.7"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -216,7 +216,7 @@ class HdhiveSignKB(_PluginBase):
         # 初始化实例级别的缓存变量
         self._login_action_id_cache = None
 
-        logger.info("============= hdhivesign v2.4.6 初始化 =============")
+        logger.info("============= hdhivesign v2.4.7 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -582,70 +582,62 @@ class HdhiveSignKB(_PluginBase):
             proxies = self._get_proxies()
             ua = settings.USER_AGENT
 
-            # v2.4.6: 尝试多种CSRF策略
-            csrf_strategies = []
+            # v2.4.7: 简化CSRF处理，加异常捕获定位 None 问题
+            csrf_token = cookies.get('csrf_access_token')
+            hdh_sa_token = cookies.get('hdh_sa_token')
+
+            # 构建基础 headers
+            base_headers = {
+                'User-Agent': ua,
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Origin': self._base_url,
+                'Referer': referer,
+                'Authorization': f'Bearer {token}',
+                'X-Requested-With': 'XMLHttpRequest',
+            }
+
+            # 尝试签到，优先用 csrf_access_token 作为 CSRF 头
+            attempt_configs = []
             if csrf_token:
-                csrf_strategies.append(('x-csrf-token', csrf_token))
+                attempt_configs.append({
+                    'label': 'csrf_access_token',
+                    'headers': {**base_headers, 'x-csrf-token': csrf_token},
+                })
             if hdh_sa_token:
-                csrf_strategies.append(('x-csrf-token', hdh_sa_token))
-                csrf_strategies.append(('x-nextjs-csrf', hdh_sa_token))
-            # 去重
-            seen = set()
-            unique_strategies = []
-            for k, v in csrf_strategies:
-                key = (k, v)
-                if key not in seen:
-                    seen.add(key)
-                    unique_strategies.append((k, v))
+                attempt_configs.append({
+                    'label': 'hdh_sa_token',
+                    'headers': {**base_headers, 'x-csrf-token': hdh_sa_token},
+                })
+            # 兜底：无 CSRF 头
+            attempt_configs.append({
+                'label': 'no-csrf',
+                'headers': dict(base_headers),
+            })
 
             signin_res = None
-            for csrf_header_name, csrf_header_value in unique_strategies:
-                headers = {
-                    'User-Agent': ua,
-                    'Accept': 'application/json, text/plain, */*',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                    'Origin': self._base_url,
-                    'Referer': referer,
-                    'Authorization': f'Bearer {token}',
-                    'X-Requested-With': 'XMLHttpRequest',
-                    csrf_header_name: csrf_header_value,
-                }
-
-                logger.info(f"签到请求尝试: CSRF策略={csrf_header_name}, "
-                            f"cookie_keys={list(cookies.keys())}")
-                signin_res = requests.post(
-                    url=self._signin_api,
-                    headers=headers,
-                    cookies=cookies,
-                    proxies=proxies,
-                    timeout=30,
-                    verify=False
-                )
-                if signin_res is not None and signin_res.status_code != 401:
-                    logger.info(f"CSRF策略 {csrf_header_name} 成功，状态码 {signin_res.status_code}")
-                    break
-                logger.warning(f"CSRF策略 {csrf_header_name} 返回 {signin_res.status_code if signin_res else 'None'}，尝试下一个...")
-
-            if signin_res is None:
-                # 最后兜底：不带任何 CSRF header 尝试
-                logger.info("签到请求兜底: 无CSRF头")
-                headers = {
-                    'User-Agent': ua,
-                    'Accept': 'application/json, text/plain, */*',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                    'Origin': self._base_url,
-                    'Referer': referer,
-                    'Authorization': f'Bearer {token}',
-                    'X-Requested-With': 'XMLHttpRequest',
-                }
-                signin_res = requests.post(
-                    url=self._signin_api,
-                    headers=headers,
-                    cookies=cookies,
-                    proxies=proxies,
-                    timeout=30,
-                    verify=False
-                )
+            last_error = None
+            for attempt in attempt_configs:
+                try:
+                    logger.info(f"签到请求: 策略={attempt['label']}, "
+                                f"cookies={list(cookies.keys())}")
+                    signin_res = requests.post(
+                        url=self._signin_api,
+                        headers=attempt['headers'],
+                        cookies=cookies,
+                        proxies=proxies,
+                        timeout=30,
+                        verify=False,
+                    )
+                    logger.info(f"签到请求: 策略={attempt['label']}, "
+                                f"status={signin_res.status_code}")
+                    if signin_res.status_code != 401:
+                        break
+                except Exception as exc:
+                    last_error = str(exc)
+                    logger.error(f"签到请求异常 (策略={attempt['label']}): {exc}", exc_info=True)
+                    signin_res = None
+                    continue
 
             if signin_res is None:
                 return False, '签到请求失败，响应为空，请检查代理或网络环境'
