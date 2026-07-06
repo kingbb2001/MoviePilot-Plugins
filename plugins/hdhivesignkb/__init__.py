@@ -1,6 +1,6 @@
 ﻿"""
 影巢签到插件
-版本: 2.4.5
+版本: 2.4.6
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,9 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.4.6: 修复签到API"请求签名缺失"：_signin_base改为多CSRF策略轮询尝试
+  （x-csrf-token/hdh_sa_token + x-nextjs-csrf），覆盖Next.js Server Action
+  CSRF和传统CSRF两种模式；401/403时输出完整响应体(前1000字符)便于定位问题
 - v2.4.5: 修复_extract_login_cookie只提取token和csrf_access_token导致遗漏签名cookie：
   改为捕获登录响应中所有Set-Cookie并完整组装；新增cookie键名日志输出方便排查；
   _warmup_session改用cloudscraper优先+多页面回退（首页→登录页）避免SSL/CF拦截；
@@ -71,7 +74,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.4.5"
+    plugin_version = "2.4.6"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -213,7 +216,7 @@ class HdhiveSignKB(_PluginBase):
         # 初始化实例级别的缓存变量
         self._login_action_id_cache = None
 
-        logger.info("============= hdhivesign v2.4.5 初始化 =============")
+        logger.info("============= hdhivesign v2.4.6 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -549,12 +552,10 @@ class HdhiveSignKB(_PluginBase):
 
 
     def _signin_base(self) -> Tuple[bool, str]:
-        """
-        基于影巢API的签到实现
-        API返回格式 (实测确认):
-          成功: {"success": true, "message": "获得 XX 积分", ...}
-          已签到: {"success": false, "message": "签到失败", "description": "你已经签到过了，明天再来吧", "code": "400"}
-          失败: {"success": false, "message": "...", "description": "...", "code": "400/500"}
+        """基于影巢API的签到实现。
+
+        v2.4.6: 增强CSRF处理——同时发送 csrf_access_token 和 hdh_sa_token；
+        增加完整响应体日志以便排查"请求签名缺失"。
         """
         try:
             cookies, token = self._parse_cookie()
@@ -562,16 +563,16 @@ class HdhiveSignKB(_PluginBase):
                 return False, "未配置Cookie"
 
             csrf_token = cookies.get('csrf_access_token')
+            hdh_sa_token = cookies.get('hdh_sa_token')  # v2.4.6: Server Action CSRF
 
             if not token:
                 return False, "Cookie中缺少'token'"
 
-            # 解析用户ID：影巢JWT的user_id字段在payload中叫"user_id"而非"sub"
+            # 解析用户ID
             user_id = None
             referer = self._site_url
             try:
                 decoded_token = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
-                # 优先用 user_id 字段（影巢实际使用的），回退到 sub
                 user_id = decoded_token.get('user_id') or decoded_token.get('sub')
                 if user_id:
                     referer = f"{self._base_url}/user/{user_id}"
@@ -581,31 +582,70 @@ class HdhiveSignKB(_PluginBase):
             proxies = self._get_proxies()
             ua = settings.USER_AGENT
 
-            headers = {
-                'User-Agent': ua,
-                'Accept': 'application/json, text/plain, */*',
-                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                'Origin': self._base_url,
-                'Referer': referer,
-                'Authorization': f'Bearer {token}',
-                'X-Requested-With': 'XMLHttpRequest',
-            }
+            # v2.4.6: 尝试多种CSRF策略
+            csrf_strategies = []
             if csrf_token:
-                headers['x-csrf-token'] = csrf_token
+                csrf_strategies.append(('x-csrf-token', csrf_token))
+            if hdh_sa_token:
+                csrf_strategies.append(('x-csrf-token', hdh_sa_token))
+                csrf_strategies.append(('x-nextjs-csrf', hdh_sa_token))
+            # 去重
+            seen = set()
+            unique_strategies = []
+            for k, v in csrf_strategies:
+                key = (k, v)
+                if key not in seen:
+                    seen.add(key)
+                    unique_strategies.append((k, v))
 
-            logger.debug(f"签到请求: URL={self._signin_api}, "
-                         f"has_auth={'是' if token else '否'}, "
-                         f"has_csrf={'是' if csrf_token else '否'}, "
-                         f"cookie_keys={list(cookies.keys())}")
+            signin_res = None
+            for csrf_header_name, csrf_header_value in unique_strategies:
+                headers = {
+                    'User-Agent': ua,
+                    'Accept': 'application/json, text/plain, */*',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                    'Origin': self._base_url,
+                    'Referer': referer,
+                    'Authorization': f'Bearer {token}',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    csrf_header_name: csrf_header_value,
+                }
 
-            signin_res = requests.post(
-                url=self._signin_api,
-                headers=headers,
-                cookies=cookies,
-                proxies=proxies,
-                timeout=30,
-                verify=False
-            )
+                logger.info(f"签到请求尝试: CSRF策略={csrf_header_name}, "
+                            f"cookie_keys={list(cookies.keys())}")
+                signin_res = requests.post(
+                    url=self._signin_api,
+                    headers=headers,
+                    cookies=cookies,
+                    proxies=proxies,
+                    timeout=30,
+                    verify=False
+                )
+                if signin_res is not None and signin_res.status_code != 401:
+                    logger.info(f"CSRF策略 {csrf_header_name} 成功，状态码 {signin_res.status_code}")
+                    break
+                logger.warning(f"CSRF策略 {csrf_header_name} 返回 {signin_res.status_code if signin_res else 'None'}，尝试下一个...")
+
+            if signin_res is None:
+                # 最后兜底：不带任何 CSRF header 尝试
+                logger.info("签到请求兜底: 无CSRF头")
+                headers = {
+                    'User-Agent': ua,
+                    'Accept': 'application/json, text/plain, */*',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                    'Origin': self._base_url,
+                    'Referer': referer,
+                    'Authorization': f'Bearer {token}',
+                    'X-Requested-With': 'XMLHttpRequest',
+                }
+                signin_res = requests.post(
+                    url=self._signin_api,
+                    headers=headers,
+                    cookies=cookies,
+                    proxies=proxies,
+                    timeout=30,
+                    verify=False
+                )
 
             if signin_res is None:
                 return False, '签到请求失败，响应为空，请检查代理或网络环境'
@@ -645,7 +685,14 @@ class HdhiveSignKB(_PluginBase):
                     pass
                 return True, display_message
 
-            logger.error(f"签到失败, HTTP状态码: {signin_res.status_code}, 消息: {display_message}")
+            # v2.4.6: 401/403时输出完整响应体便于排查
+            if signin_res.status_code in (401, 403):
+                logger.error(
+                    f"签到失败 (HTTP {signin_res.status_code}), "
+                    f"响应体: {signin_res.text[:1000]}"
+                )
+            else:
+                logger.error(f"签到失败, HTTP状态码: {signin_res.status_code}, 消息: {display_message}")
             return False, display_message
 
         except Exception as e:
