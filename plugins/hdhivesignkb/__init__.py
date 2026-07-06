@@ -80,7 +80,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.5.1"
+    plugin_version = "2.5.2"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -223,7 +223,7 @@ class HdhiveSignKB(_PluginBase):
         self._login_action_id_cache = None
         self._checkin_action_id = None  # v2.4.8: 签到Server Action ID缓存
 
-        logger.info("============= hdhivesign v2.5.1 初始化 =============")
+        logger.info("============= hdhivesign v2.5.2 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -1842,11 +1842,12 @@ class HdhiveSignKB(_PluginBase):
     def _try_server_action_checkin(self, action_id: str,
                                     cookies: Dict[str, str],
                                     token: str) -> Tuple[bool, str]:
-        """使用Server Action方式签到（v2.5.0重写RSC解析）。
+        """使用Server Action方式签到（v2.5.2重写RSC解析）。
 
-        Next.js Server Action 返回 RSC 流，格式为换行分隔的 <id>:<data>。
-        v2.5.0: 逐行扫描RSC文本，解析每行的JSON数据段，
-        搜索签到结果关键字（积分/签到成功/已签到等）。
+        优先逐行提取JSON（最干净），然后按优先级检测：
+        1. 已签到 → 返回干净中文消息
+        2. 签到成功 → 提取积分和消息
+        3. 其他 → 返回首个有意义的中文片段
         """
         try:
             proxies = self._get_proxies()
@@ -1878,80 +1879,104 @@ class HdhiveSignKB(_PluginBase):
                 text = getattr(resp, 'text', '') or ''
                 logger.info(f"Server Action签到: 响应长度={len(text)}")
 
-                # v2.5.0: 全局关键词搜索（不依赖行解析）
-                keywords_found = []
+                # ── v2.5.2: 策略1 — 从RSC行中提取完整JSON对象 ──
+                rsc_jsons = []
+                for line in text.split('\n'):
+                    line = line.strip()
+                    if ':' not in line:
+                        continue
+                    colon = line.find(':')
+                    data = line[colon + 1:]
+                    if data.startswith('{'):
+                        # 找到完整的JSON对象（匹配花括号深度）
+                        depth = 0
+                        end = -1
+                        for i, ch in enumerate(data):
+                            if ch == '{':
+                                depth += 1
+                            elif ch == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    end = i + 1
+                                    break
+                        if end > 0:
+                            json_str = data[:end]
+                            try:
+                                obj = json.loads(json_str)
+                                if isinstance(obj, dict):
+                                    rsc_jsons.append(obj)
+                            except (json.JSONDecodeError, ValueError):
+                                continue
 
-                # 搜索 "积分" — 签到成功必然包含
-                for m in re.finditer(r'积分', text):
-                    start = max(0, m.start() - 100)
-                    end = min(len(text), m.end() + 100)
-                    snippet = text[start:end]
-                    keywords_found.append(('积分', snippet[:200]))
+                # ── 检测JSON中的签到结果 ──
+                for obj in rsc_jsons:
+                    obj_str = json.dumps(obj, ensure_ascii=False)
+                    logger.debug(f"Server Action签到JSON: {obj_str[:300]}")
+                    msg = obj.get('message', '')
+                    desc = obj.get('description', '')
+                    success = obj.get('success', None)
 
-                # 搜索 "签到成功"
-                for m in re.finditer(r'签到成功', text):
-                    start = max(0, m.start() - 50)
-                    end = min(len(text), m.end() + 100)
-                    keywords_found.append(('签到成功', text[start:end]))
+                    # 已签到检测（最高优先级）
+                    combined = f"{msg} {desc}"
+                    if any(kw in combined for kw in
+                           ['已经签到', '签到过', '重复签到', '明日再来']):
+                        logger.info(f"Server Action签到: 已签到 → {msg}")
+                        return True, desc or msg or "今天已经签到过了"
 
-                # 搜索 "已经签到" / "签到过"
+                    # 签到成功
+                    if success is True and msg:
+                        logger.info(f"Server Action签到成功: {msg}")
+                        return True, msg
+
+                    # 有积分相关字段
+                    if 'points' in obj or '积分' in obj_str:
+                        logger.info(f"Server Action签到(积分): {obj_str[:300]}")
+                        return True, msg or obj_str[:300]
+
+                # ── 策略2: 全局关键词搜索（仅提取纯中文文本） ──
+                # 已签到
                 for kw in ['已经签到', '签到过', '重复签到', '明日再来']:
                     if kw in text:
-                        idx = text.find(kw)
-                        start = max(0, idx - 30)
-                        end = min(len(text), idx + 80)
-                        keywords_found.append((kw, text[start:end]))
+                        # 提取周围的纯中文片段
+                        for m in re.finditer(r'[一-鿿]+', text):
+                            if kw in m.group():
+                                idx = text.find(m.group())
+                                snippet = text[max(0,idx-5):idx+len(m.group())+50]
+                                # 只保留可打印ASCII+中文
+                                clean = ''.join(
+                                    c for c in snippet
+                                    if c.isprintable() and (
+                                        '一' <= c <= '鿿'
+                                        or c in '，。！？、：；（）""'''
+                                        or c.isascii())
+                                )
+                                logger.info(f"Server Action签到已签到: {clean[:200]}")
+                                return True, "今天已经签到过了，明天再来吧"
 
-                # 搜索 success 相关 JSON
-                for m in re.finditer(r'"success"\s*:\s*(true|false)', text):
-                    start = max(0, m.start() - 80)
-                    end = min(len(text), m.end() + 200)
-                    snippet = text[start:end]
-                    # 只保留包含中文或message的
-                    if any(c in snippet for c in '积分签到获得消息'):
-                        keywords_found.append(('success_json', snippet[:250]))
-
-                if keywords_found:
-                    for kw, snippet in keywords_found:
-                        logger.info(f"Server Action签到: 找到 [{kw}] → {snippet[:200]}")
-                    # 汇总
-                    msgs = [s for _, s in keywords_found]
-                    combined = " | ".join(msgs)[:500]
-                    return True, combined
-
-                # 尝试按行解析JSON
-                logger.info("Server Action签到: 关键词未匹配，尝试逐行JSON解析...")
-                for line in text.split('\n')[:200]:
-                    line = line.strip()
-                    if not line or ':' not in line:
-                        continue
-                    # RSC行格式: <id>:<data>
-                    colon_idx = line.find(':')
-                    data = line[colon_idx + 1:]
-                    if data.startswith('{') and data.endswith('}'):
-                        try:
-                            obj = json.loads(data)
-                            if isinstance(obj, dict):
-                                obj_str = json.dumps(obj, ensure_ascii=False)
-                                if any(kw in obj_str for kw in
-                                       ['积分', '签到', 'checkin', 'sign',
-                                        'success', 'points', 'message']):
-                                    logger.info(f"Server Action签到JSON: {obj_str[:300]}")
-                                    return True, obj_str[:300]
-                        except (json.JSONDecodeError, ValueError):
-                            continue
-
-                # 兜底：搜索任何看起来像签到结果的内容
-                for kw in ['获得', '积分', '签到', '奖励', '成功', '失败']:
+                # 签到成功
+                for kw in ['获得', '积分', '签到成功']:
                     if kw in text:
                         idx = text.find(kw)
-                        snippet = text[max(0,idx-30):min(len(text),idx+120)]
-                        logger.info(f"Server Action签到兜底({kw}): {snippet}")
-                        return True, snippet
+                        snippet = text[max(0,idx-10):min(len(text),idx+100)]
+                        clean = ''.join(
+                            c for c in snippet
+                            if c.isprintable() and (
+                                '一' <= c <= '鿿'
+                                or c in '，。！？、：；（）""''0123456789'
+                                or (c.isascii() and c.isprintable()))
+                        ).strip()
+                        if clean and len(clean) > 5:
+                            logger.info(f"Server Action签到成功({kw}): {clean[:200]}")
+                            return True, clean[:200]
 
-                logger.warning(f"Server Action签到: 200但完全未找到签到结果，"
-                               f"响应长度={len(text)}")
-                return False, f"RSC响应中未找到签到结果 (长度={len(text)})"
+                # ── 策略3: 返回首个有意义的JSON或中文片段 ──
+                if rsc_jsons:
+                    first = json.dumps(rsc_jsons[0], ensure_ascii=False)
+                    logger.info(f"Server Action签到(首个JSON): {first[:200]}")
+                    return True, first[:200]
+
+                logger.warning(f"Server Action签到: 200但完全未找到签到结果")
+                return False, "签到返回200但解析失败"
 
             # 非200
             resp_text = (getattr(resp, 'text', '') or '')[:500]
