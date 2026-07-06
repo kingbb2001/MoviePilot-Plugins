@@ -1,6 +1,6 @@
 ﻿"""
 影巢签到插件
-版本: 2.4.9
+版本: 2.5.0
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -80,7 +80,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.4.9"
+    plugin_version = "2.5.0"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -223,7 +223,7 @@ class HdhiveSignKB(_PluginBase):
         self._login_action_id_cache = None
         self._checkin_action_id = None  # v2.4.8: 签到Server Action ID缓存
 
-        logger.info("============= hdhivesign v2.4.9 初始化 =============")
+        logger.info("============= hdhivesign v2.5.0 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -1846,14 +1846,11 @@ class HdhiveSignKB(_PluginBase):
     def _try_server_action_checkin(self, action_id: str,
                                     cookies: Dict[str, str],
                                     token: str) -> Tuple[bool, str]:
-        """使用Server Action方式签到（v2.4.8新增，v2.4.9完善RSC解析）。
+        """使用Server Action方式签到（v2.5.0重写RSC解析）。
 
-        Next.js Server Action 返回 RSC (React Server Component) 流，
-        格式为换行分隔的 <id>:<data>，其中data可能是JSON或React元素引用。
-        签到结果JSON嵌在RSC流的某一行中。
-
-        Returns:
-            (success, message) 元组
+        Next.js Server Action 返回 RSC 流，格式为换行分隔的 <id>:<data>。
+        v2.5.0: 逐行扫描RSC文本，解析每行的JSON数据段，
+        搜索签到结果关键字（积分/签到成功/已签到等）。
         """
         try:
             proxies = self._get_proxies()
@@ -1885,61 +1882,82 @@ class HdhiveSignKB(_PluginBase):
                 text = getattr(resp, 'text', '') or ''
                 logger.info(f"Server Action签到: 响应长度={len(text)}")
 
-                # v2.4.9: 在完整RSC文本中搜索签到结果
-                # RSC格式: 每行 "<id>:<json-or-component-ref>"
-                # 签到结果通常在JSON行中，包含 success/message/points 等字段
+                # v2.5.0: 全局关键词搜索（不依赖行解析）
+                keywords_found = []
 
-                # 模式1: 搜索包含签到结果的JSON对象
-                # RSC中JSON行格式: "数字:{"success":true,"message":"获得 X 积分",...}"
-                result_patterns = [
-                    r'\{[^}]*"success"\s*:\s*true[^}]*"message"\s*:\s*"([^"]*)"[^}]*\}',
-                    r'\{[^}]*"message"\s*:\s*"([^"]*)"[^}]*"success"\s*:\s*true[^}]*\}',
-                ]
-                for pat in result_patterns:
-                    m = re.search(pat, text)
-                    if m:
-                        msg = m.group(1)
-                        logger.info(f"Server Action签到成功: {msg}")
-                        return True, msg
+                # 搜索 "积分" — 签到成功必然包含
+                for m in re.finditer(r'积分', text):
+                    start = max(0, m.start() - 100)
+                    end = min(len(text), m.end() + 100)
+                    snippet = text[start:end]
+                    keywords_found.append(('积分', snippet[:200]))
 
-                # 模式2: 在RSC中搜索"已签到"相关文本
-                already_signed_patterns = [
-                    r'"message"\s*:\s*"([^"]*已经签到[^"]*)"',
-                    r'"message"\s*:\s*"([^"]*签到过[^"]*)"',
-                    r'"description"\s*:\s*"([^"]*已经签到[^"]*)"',
-                    r'"description"\s*:\s*"([^"]*签到过[^"]*)"',
-                ]
-                for pat in already_signed_patterns:
-                    m = re.search(pat, text)
-                    if m:
-                        msg = m.group(1)
-                        logger.info(f"Server Action签到: 已签到 - {msg}")
-                        return True, msg
+                # 搜索 "签到成功"
+                for m in re.finditer(r'签到成功', text):
+                    start = max(0, m.start() - 50)
+                    end = min(len(text), m.end() + 100)
+                    keywords_found.append(('签到成功', text[start:end]))
 
-                # 模式3: 在文本中搜索关键词
-                if '签到成功' in text or '获得' in text:
-                    # 尝试提取更多上下文
-                    idx = text.find('签到成功')
-                    if idx < 0:
-                        idx = text.find('获得')
-                    snippet = text[max(0,idx-50):min(len(text),idx+150)]
-                    logger.info(f"Server Action签到成功(关键词): {snippet[:200]}")
-                    return True, snippet[:200]
+                # 搜索 "已经签到" / "签到过"
+                for kw in ['已经签到', '签到过', '重复签到', '明日再来']:
+                    if kw in text:
+                        idx = text.find(kw)
+                        start = max(0, idx - 30)
+                        end = min(len(text), idx + 80)
+                        keywords_found.append((kw, text[start:end]))
 
-                if '已经签到' in text or '重复签到' in text:
-                    idx = text.find('已经签到')
-                    if idx < 0:
-                        idx = text.find('重复签到')
-                    snippet = text[max(0,idx-20):min(len(text),idx+100)]
-                    logger.info(f"Server Action签到: 已签到(关键词) - {snippet[:200]}")
-                    return True, "已经签到过了"
+                # 搜索 success 相关 JSON
+                for m in re.finditer(r'"success"\s*:\s*(true|false)', text):
+                    start = max(0, m.start() - 80)
+                    end = min(len(text), m.end() + 200)
+                    snippet = text[start:end]
+                    # 只保留包含中文或message的
+                    if any(c in snippet for c in '积分签到获得消息'):
+                        keywords_found.append(('success_json', snippet[:250]))
 
-                # 没有找到签到结果，记录部分响应用于调试
-                logger.warning(f"Server Action签到: 200但未找到签到结果，"
-                               f"响应前500字符: {text[:500]}")
+                if keywords_found:
+                    for kw, snippet in keywords_found:
+                        logger.info(f"Server Action签到: 找到 [{kw}] → {snippet[:200]}")
+                    # 汇总
+                    msgs = [s for _, s in keywords_found]
+                    combined = " | ".join(msgs)[:500]
+                    return True, combined
+
+                # 尝试按行解析JSON
+                logger.info("Server Action签到: 关键词未匹配，尝试逐行JSON解析...")
+                for line in text.split('\n')[:200]:
+                    line = line.strip()
+                    if not line or ':' not in line:
+                        continue
+                    # RSC行格式: <id>:<data>
+                    colon_idx = line.find(':')
+                    data = line[colon_idx + 1:]
+                    if data.startswith('{') and data.endswith('}'):
+                        try:
+                            obj = json.loads(data)
+                            if isinstance(obj, dict):
+                                obj_str = json.dumps(obj, ensure_ascii=False)
+                                if any(kw in obj_str for kw in
+                                       ['积分', '签到', 'checkin', 'sign',
+                                        'success', 'points', 'message']):
+                                    logger.info(f"Server Action签到JSON: {obj_str[:300]}")
+                                    return True, obj_str[:300]
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+
+                # 兜底：搜索任何看起来像签到结果的内容
+                for kw in ['获得', '积分', '签到', '奖励', '成功', '失败']:
+                    if kw in text:
+                        idx = text.find(kw)
+                        snippet = text[max(0,idx-30):min(len(text),idx+120)]
+                        logger.info(f"Server Action签到兜底({kw}): {snippet}")
+                        return True, snippet
+
+                logger.warning(f"Server Action签到: 200但完全未找到签到结果，"
+                               f"响应长度={len(text)}")
                 return False, f"RSC响应中未找到签到结果 (长度={len(text)})"
 
-            # 401或其它错误
+            # 非200
             resp_text = (getattr(resp, 'text', '') or '')[:500]
             logger.warning(f"Server Action签到失败: status={resp.status_code}, "
                            f"body={resp_text[:300]}")
