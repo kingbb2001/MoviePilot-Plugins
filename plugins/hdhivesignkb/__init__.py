@@ -1,6 +1,6 @@
 ﻿"""
 影巢签到插件
-版本: 2.4.1
+版本: 2.4.2
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.4.2: 修复自动登录正则：影巢createServerReference调用带变量前缀(0,u.createServerReference)(...)，action ID为42位hex（不是40位），原正则无法匹配
 - v2.4.1: 修复自动登录：废弃失效的ckid.workers.dev服务，改为直接从登录页JS chunk提取Server Action ID；密码base64编码；GET /login获取hdh_sa_token反CSRF cookie后POST
 - v2.4.0: 重构签到逻辑：提取_parse_cookie统一cookie解析、sign()方法从302行拆分为164行
 - v2.3.9: 重构：提取_save_config统一配置持久化，替换3处重复update_config调用
@@ -1531,20 +1532,28 @@ class HdhiveSignKB(_PluginBase):
                 logger.warning("自动登录: login page chunk 内容为空")
                 return None
 
-            # 匹配 createServerReference("actionId",...,"login")
-            # actionId 是 40 位 hex（实测: 60259b58ded6fccd4bb7622731ec8f70dd20d0649d）
-            m = re.search(r'createServerReference\("([a-f0-9]{40})"[^)]*"login"\)', js_text)
+            # 匹配 createServerReference(actionId, ..., "login")
+            # 真实 chunk 格式（实测 2026-07-06）:
+            #   let f=(0,u.createServerReference)("60259b58ded6fccd4bb7622731ec8f70dd20d0649d",u.callServer,void 0,u.findSourceMapURL,"login");
+            # createServerReference 前面可能带 (0,u. 等变量前缀，所以不能写 createServerReference\(
+            # actionId 是 40-44 位 hex（影巢实际为 42 位），作为 createServerReference 调用括号内的第一个参数
+            m = re.search(
+                r'createServerReference\s*\)\s*\(\s*"([a-f0-9]{40,44})"[^()]*"login"\s*\)',
+                js_text
+            )
             if m:
                 action_id = m.group(1)
-                logger.info(f"自动登录: 从 JS chunk 提取到 Server Action ID={action_id}")
+                logger.info(f"自动登录: 从 JS chunk 提取到 Server Action ID={action_id} (len={len(action_id)})")
                 return action_id
 
-            # 回退：尝试更宽松的匹配
-            m = re.search(r'"([a-f0-9]{40})"[^}]{0,100}"login"', js_text)
-            if m:
-                action_id = m.group(1)
-                logger.info(f"自动登录: 从 JS chunk 提取到 Server Action ID (宽松匹配)={action_id}")
-                return action_id
+            # 回退：宽松匹配 - 在 "login" 字符串前 200 字符内找 40-44 位 hex
+            for m2 in re.finditer(r'"([a-f0-9]{40,44})"', js_text):
+                idx = m2.start()
+                nearby = js_text[max(0, idx - 200): min(len(js_text), m2.end() + 200)]
+                if '"login"' in nearby:
+                    action_id = m2.group(1)
+                    logger.info(f"自动登录: 从 JS chunk 提取到 Server Action ID (宽松匹配)={action_id}")
+                    return action_id
 
             logger.warning("自动登录: 未能在 JS chunk 中匹配到 login Server Action ID")
             return None
