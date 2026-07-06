@@ -1,6 +1,6 @@
 ﻿"""
 影巢签到插件
-版本: 2.4.2
+版本: 2.4.3
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,9 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.4.3: 修复版本号与package.json不一致导致插件市场更新失败（plugin_version由2.4.1→2.4.3）；
+  修复plugin_icon指向错误仓库(madrays→kingbb2001)；_login_action_id_cache改为实例变量避免多实例冲突；
+  改进Server Action ID正则：hex长度范围扩大到40-48位，新增多重回退匹配策略，扩展附近文本搜索范围到300字符
 - v2.4.2: 修复自动登录正则：影巢createServerReference调用带变量前缀(0,u.createServerReference)(...)，action ID为42位hex（不是40位），原正则无法匹配
 - v2.4.1: 修复自动登录：废弃失效的ckid.workers.dev服务，改为直接从登录页JS chunk提取Server Action ID；密码base64编码；GET /login获取hdh_sa_token反CSRF cookie后POST
 - v2.4.0: 重构签到逻辑：提取_parse_cookie统一cookie解析、sign()方法从302行拆分为164行
@@ -59,9 +62,9 @@ class HdhiveSignKB(_PluginBase):
     # 插件描述
     plugin_desc = "自动完成影巢(HDHive)每日签到，支持失败重试和历史记录"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
+    plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.4.1"
+    plugin_version = "2.4.3"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -139,8 +142,7 @@ class HdhiveSignKB(_PluginBase):
     _signin_api = f"{_base_url}/api/customer/user/checkin"
     _user_info_api = f"{_base_url}/api/customer/user/info"
     _login_page = "/login"
-    # Server Action ID 缓存（从登录页 JS chunk 动态提取，避免每次登录都重新抓取）
-    _login_action_id_cache: Optional[str] = None
+    # Server Action ID 缓存（从登录页 JS chunk 动态提取，在 init_plugin 中初始化为实例变量）
 
     def _get_proxies(self):
         """
@@ -201,7 +203,10 @@ class HdhiveSignKB(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign v2.4.1 初始化 =============")
+        # 初始化实例级别的缓存变量
+        self._login_action_id_cache = None
+
+        logger.info("============= hdhivesign v2.4.3 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -1536,9 +1541,9 @@ class HdhiveSignKB(_PluginBase):
             # 真实 chunk 格式（实测 2026-07-06）:
             #   let f=(0,u.createServerReference)("60259b58ded6fccd4bb7622731ec8f70dd20d0649d",u.callServer,void 0,u.findSourceMapURL,"login");
             # createServerReference 前面可能带 (0,u. 等变量前缀，所以不能写 createServerReference\(
-            # actionId 是 40-44 位 hex（影巢实际为 42 位），作为 createServerReference 调用括号内的第一个参数
+            # actionId 是 hex 字符串（40-48 位），作为 createServerReference 调用括号内的第一个参数
             m = re.search(
-                r'createServerReference\s*\)\s*\(\s*"([a-f0-9]{40,44})"[^()]*"login"\s*\)',
+                r'createServerReference\s*\)\s*\(\s*"([a-f0-9]{40,48})".*?"login"\s*\)',
                 js_text
             )
             if m:
@@ -1546,10 +1551,20 @@ class HdhiveSignKB(_PluginBase):
                 logger.info(f"自动登录: 从 JS chunk 提取到 Server Action ID={action_id} (len={len(action_id)})")
                 return action_id
 
-            # 回退：宽松匹配 - 在 "login" 字符串前 200 字符内找 40-44 位 hex
-            for m2 in re.finditer(r'"([a-f0-9]{40,44})"', js_text):
+            # 回退方案1: [^()] 版本，兼容旧格式
+            m_fallback = re.search(
+                r'createServerReference\s*\)\s*\(\s*"([a-f0-9]{40,48})"[^()]*"login"\s*\)',
+                js_text
+            )
+            if m_fallback:
+                action_id = m_fallback.group(1)
+                logger.info(f"自动登录: 从 JS chunk 提取到 Server Action ID (fallback1)={action_id} (len={len(action_id)})")
+                return action_id
+
+            # 回退方案2: 宽松匹配 - 在 "login" 字符串前 300 字符内找 40-48 位 hex
+            for m2 in re.finditer(r'"([a-f0-9]{40,48})"', js_text):
                 idx = m2.start()
-                nearby = js_text[max(0, idx - 200): min(len(js_text), m2.end() + 200)]
+                nearby = js_text[max(0, idx - 300): min(len(js_text), m2.end() + 300)]
                 if '"login"' in nearby:
                     action_id = m2.group(1)
                     logger.info(f"自动登录: 从 JS chunk 提取到 Server Action ID (宽松匹配)={action_id}")
