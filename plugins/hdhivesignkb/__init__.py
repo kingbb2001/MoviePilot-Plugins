@@ -1,6 +1,6 @@
 ﻿"""
 影巢签到插件
-版本: 2.4.7
+版本: 2.4.8
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,10 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.4.8: 实现签到Server Action方式（仿照登录流程）：_warmup_session从首页JS chunk
+  自动搜索签到Server Action ID；新增_get_server_action_id()通用方法支持任意关键字搜索；
+  新增_try_server_action_checkin()使用Next-Action头+Server Action body格式签到；
+  _signin_base优先用Server Action方式，失败后回退REST API
 - v2.4.7: 重写_signin_base请求逻辑：每次requests.post()加try-except捕获具体异常；
   精简CSRF策略为3级（csrf_access_token → hdh_sa_token → 无CSRF）；
   每次请求记录实际HTTP状态码和异常信息，彻底定位"返回None"根因
@@ -74,7 +78,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.4.7"
+    plugin_version = "2.4.8"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -215,8 +219,9 @@ class HdhiveSignKB(_PluginBase):
 
         # 初始化实例级别的缓存变量
         self._login_action_id_cache = None
+        self._checkin_action_id = None  # v2.4.8: 签到Server Action ID缓存
 
-        logger.info("============= hdhivesign v2.4.7 初始化 =============")
+        logger.info("============= hdhivesign v2.4.8 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -579,6 +584,16 @@ class HdhiveSignKB(_PluginBase):
             except Exception as e:
                 logger.warning(f"从Token中解析用户ID失败，将使用默认Referer: {e}")
 
+            # ★ v2.4.8: 如果有签到Server Action ID，优先用Server Action方式
+            checkin_action_id = getattr(self, '_checkin_action_id', None)
+            if checkin_action_id:
+                logger.info(f"尝试Server Action签到 (actionId={checkin_action_id[:16]}...)")
+                sa_success, sa_msg = self._try_server_action_checkin(
+                    checkin_action_id, cookies, token)
+                if sa_success or "已经签到" in sa_msg:
+                    return True, sa_msg
+                logger.info(f"Server Action签到未成功({sa_msg})，回退到REST API")
+
             proxies = self._get_proxies()
             ua = settings.USER_AGENT
 
@@ -694,8 +709,8 @@ class HdhiveSignKB(_PluginBase):
     def _warmup_session(self, cookie_str: str) -> Optional[str]:
         """登录/获取Cookie后预热会话：访问站点建立完整Cookie上下文。
 
-        v2.4.5: 优先用 cloudscraper（可绕过 Cloudflare）；如果首页SSL失败
-        则回退到 /login 页面；增加重试逻辑。
+        v2.4.8: 同时搜索首页HTML中的签到Server Action ID，
+        保存到 self._checkin_action_id 供后续使用。
         """
         try:
             cookies_dict = {}
@@ -765,6 +780,26 @@ class HdhiveSignKB(_PluginBase):
                             f"(cookies_count={len(all_cookies)}, "
                             f"keys={list(all_cookies.keys())})"
                         )
+
+                        # ★ v2.4.8: 从首页HTML搜索签到Server Action ID
+                        try:
+                            html = getattr(resp, 'text', '') or ''
+                            if html and page_label == "首页":
+                                self._checkin_action_id = self._get_server_action_id(
+                                    html, session, proxies, keyword="checkin")
+                                if not self._checkin_action_id:
+                                    # 回退：搜索 "sign" 或 "daily"
+                                    self._checkin_action_id = self._get_server_action_id(
+                                        html, session, proxies, keyword="sign")
+                                if self._checkin_action_id:
+                                    logger.info(f"会话预热: 找到签到Server Action ID "
+                                                f"={self._checkin_action_id[:16]}...")
+                                else:
+                                    logger.info("会话预热: 未在首页找到签到Server Action ID，"
+                                                "将使用传统API方式签到")
+                        except Exception:
+                            pass
+
                         return result
 
                     logger.info(f"会话预热: {page_label}未返回token cookie，尝试下一个...")
@@ -1731,6 +1766,144 @@ class HdhiveSignKB(_PluginBase):
         except Exception as e:
             logger.warning(f"自动登录: 提取 Server Action ID 异常: {e}")
             return None
+
+    def _get_server_action_id(self, html_text: str, scraper, proxies,
+                              keyword: str) -> Optional[str]:
+        """从页面HTML的JS chunk中搜索指定关键字的Server Action ID。
+
+        v2.4.8: 通用化 _get_login_action_id，支持搜索任意关键字的 action ID。
+        用于从首页搜索 "checkin" / "sign" 等签到相关的 action ID。
+
+        Args:
+            html_text: 页面HTML文本
+            scraper: requests.Session 或 cloudscraper
+            proxies: 代理配置
+            keyword: 要搜索的关键字（如 "login", "checkin", "sign"）
+
+        Returns:
+            Server Action ID 或 None
+        """
+        try:
+            # 从HTML中找到所有JS chunk URL
+            chunk_pattern = re.compile(
+                r'(?:static/chunks/[^\s"\']+\.js|_next/static/chunks/[^\s"\']+\.js)'
+            )
+            chunk_urls = list(set(chunk_pattern.findall(html_text)))
+            logger.info(f"_get_server_action_id({keyword}): 页面中找到 "
+                        f"{len(chunk_urls)} 个JS chunk")
+
+            for chunk_url in chunk_urls[:20]:  # 最多检查20个chunk
+                # 构建完整URL
+                if chunk_url.startswith('_next/'):
+                    js_url = f"{self._base_url}/{chunk_url}"
+                elif chunk_url.startswith('static/'):
+                    js_url = f"{self._base_url}/_next/{chunk_url}"
+                else:
+                    js_url = f"{self._base_url}/_next/{chunk_url}"
+
+                try:
+                    js_resp = scraper.get(js_url, timeout=15, proxies=proxies,
+                                          headers={'User-Agent': settings.USER_AGENT})
+                    js_text = getattr(js_resp, 'text', '') or ''
+                    if not js_text or len(js_text) < 100:
+                        continue
+
+                    # 搜索包含关键字的 Server Action 调用
+                    # 格式: createServerReference)("actionId",...,"keyword")
+                    m = re.search(
+                        rf'createServerReference\s*\)\s*\(\s*"([a-f0-9]{{40,48}})"'
+                        rf'.*?"{re.escape(keyword)}"',
+                        js_text
+                    )
+                    if m:
+                        action_id = m.group(1)
+                        logger.info(f"_get_server_action_id({keyword}): 在chunk中找到 "
+                                    f"actionId={action_id[:16]}... (len={len(action_id)})")
+                        return action_id
+
+                    # 回退：宽松搜索
+                    for m2 in re.finditer(r'"([a-f0-9]{40,48})"', js_text):
+                        idx = m2.start()
+                        nearby = js_text[max(0, idx-300):min(len(js_text), m2.end()+300)]
+                        if keyword in nearby.lower():
+                            action_id = m2.group(1)
+                            logger.info(f"_get_server_action_id({keyword}): "
+                                        f"宽松匹配找到 actionId={action_id[:16]}...")
+                            return action_id
+
+                except Exception:
+                    continue
+
+            logger.info(f"_get_server_action_id({keyword}): 未找到匹配的action ID")
+            return None
+
+        except Exception as e:
+            logger.warning(f"_get_server_action_id({keyword}) 异常: {e}")
+            return None
+
+    def _try_server_action_checkin(self, action_id: str,
+                                    cookies: Dict[str, str],
+                                    token: str) -> Tuple[bool, str]:
+        """使用Server Action方式签到（v2.4.8新增）。
+
+        影巢可能已将签到改为Next.js Server Action，需要Next-Action头
+        和特定body格式。此方法模仿_auto_login中Server Action登录的方式。
+
+        Returns:
+            (success, message) 元组
+        """
+        try:
+            proxies = self._get_proxies()
+            headers = {
+                'User-Agent': settings.USER_AGENT,
+                'Accept': 'text/x-component',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Origin': self._base_url,
+                'Referer': self._site_url,
+                'Content-Type': 'text/plain;charset=UTF-8',
+                'Next-Action': action_id,
+            }
+            # Server Action body格式: JSON数组 [args, 额外参数]
+            body = json.dumps([{}])
+
+            logger.info(f"Server Action签到: actionId={action_id[:16]}...")
+            resp = requests.post(
+                url=self._site_url,  # Server Actions POST到当前页面URL
+                headers=headers,
+                cookies=cookies,
+                data=body,
+                proxies=proxies,
+                timeout=30,
+                verify=False,
+            )
+            logger.info(f"Server Action签到: 状态码 {resp.status_code}, "
+                        f"CT={resp.headers.get('Content-Type', '?')}")
+
+            if resp.status_code == 200:
+                try:
+                    result = resp.json()
+                    success = result.get('success', False)
+                    message = result.get('message', '')
+                    return success, message or str(result)[:200]
+                except json.JSONDecodeError:
+                    # RSC响应可能不是JSON
+                    text = (getattr(resp, 'text', '') or '')[:500]
+                    logger.info(f"Server Action签到: 非JSON响应 {text[:200]}")
+                    # 检查是否包含成功标志
+                    if '签到成功' in text or '获得' in text:
+                        return True, text[:200]
+                    if '已经签到' in text or '签到过' in text:
+                        return True, "已经签到过了"
+
+            # 401或其它错误
+            resp_text = (getattr(resp, 'text', '') or '')[:500]
+            logger.warning(f"Server Action签到失败: status={resp.status_code}, "
+                           f"body={resp_text[:300]}")
+            return False, f"Server Action签到返回 {resp.status_code}"
+
+        except Exception as e:
+            logger.error(f"Server Action签到异常: {e}", exc_info=True)
+            return False, f"Server Action签到异常: {str(e)}"
 
     def _auto_login(self) -> Optional[str]:
         """
