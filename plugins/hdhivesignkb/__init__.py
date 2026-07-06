@@ -1,6 +1,6 @@
 ﻿"""
 影巢签到插件
-版本: 2.4.0
+版本: 2.4.1
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.4.1: 修复自动登录：废弃失效的ckid.workers.dev服务，改为直接从登录页JS chunk提取Server Action ID；密码base64编码；GET /login获取hdh_sa_token反CSRF cookie后POST
 - v2.4.0: 重构签到逻辑：提取_parse_cookie统一cookie解析、sign()方法从302行拆分为164行
 - v2.3.9: 重构：提取_save_config统一配置持久化，替换3处重复update_config调用
 - v2.3.8: 修复：1)combined_text定义未使用 2)方法内冗余import re as _re 3)init_plugin重复日志行
@@ -20,7 +21,7 @@
 - v2.2.1: 修复cloudscraper未安装时import直接崩溃导致自动登录完全失败（安全导入+requests回退）
 - v2.2.0: 修复代理保存丢失+Cookie提前刷新+登录流程优化(303处理+CF检测)
 - v2.1.0: 修复：1)用户名/密码保存后重新进入设置不再丢失 2)已签到场景正确识别（手动签过后不再重复重试3次） 3)API返回"已经签到"时标记为成功而非失败
-- v2.0.0: 重大更新：1)添加独立代理配置（支持HTTP/SOCKS5/系统代理/直连） 2)重写自动登录逻辑：使用actionId服务+Server Action方式 3)所有网络请求统一走插件代理配置
+- v2.0.0: 重大更新：1)添加独立代理配置（支持HTTP/SOCKS5/系统代理/直连） 2)重写自动登录逻辑：使用Server Action方式登录 3)所有网络请求统一走插件代理配置
 - v1.6.1: 修复插件目录名与ID不匹配导致的404安装失败
 - v1.4.0: 修复插件市场注册问题（添加根目录 package.json）
 - v1.3.0: 用户信息卡片美化；通知追加用户摘要；重复签到与执行前预拉取用户信息；RSC解析兜底
@@ -32,6 +33,7 @@ import time
 import requests
 import re
 import json
+import base64
 from datetime import datetime, timedelta
 
 import jwt
@@ -58,7 +60,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.4.0"
+    plugin_version = "2.4.1"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -135,13 +137,9 @@ class HdhiveSignKB(_PluginBase):
     _site_url = f"{_base_url}/"
     _signin_api = f"{_base_url}/api/customer/user/checkin"
     _user_info_api = f"{_base_url}/api/customer/user/info"
-    _login_api_candidates = [
-        "/api/customer/user/login",
-        "/api/customer/auth/login",
-    ]
     _login_page = "/login"
-    # actionId 服务（用于获取 Next.js Server Action ID）
-    _action_id_url = "https://hdhive.ckid.workers.dev"
+    # Server Action ID 缓存（从登录页 JS chunk 动态提取，避免每次登录都重新抓取）
+    _login_action_id_cache: Optional[str] = None
 
     def _get_proxies(self):
         """
@@ -202,7 +200,7 @@ class HdhiveSignKB(_PluginBase):
         # 停止现有任务
         self.stop_service()
 
-        logger.info("============= hdhivesign v2.4.0 初始化 =============")
+        logger.info("============= hdhivesign v2.4.1 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -1490,166 +1488,219 @@ class HdhiveSignKB(_PluginBase):
         except Exception:
             return None
 
+    def _get_login_action_id(self, html_text: str, scraper, proxies) -> Optional[str]:
+        """
+        从影巢登录页的 JS chunk 中提取 Server Action ID。
+        
+        影巢使用 Next.js Server Actions，登录的 action ID 在客户端 JS chunk 里
+        通过 createServerReference("xxx","login") 注册。
+        
+        流程：
+        1. 从登录页 HTML 中找到 login page 的 JS chunk URL
+        2. GET 该 JS 文件
+        3. 正则匹配 createServerReference("([a-f0-9]{40})"...,"login")
+        """
+        try:
+            # 从 HTML 中找 login page chunk URL
+            # 格式：static/chunks/app/(auth)/login/page-xxxxx.js
+            # 也可能在 RSC 格式中出现为 "static/chunks/app/(auth)/login/page-xxxxx.js"
+            chunk_patterns = [
+                r'static/chunks/app/\(auth\)/login/page-[a-z0-9]+\.js',
+                r'static/chunks/app%2F\(auth\)%2Flogin%2Fpage-[a-z0-9]+\.js',
+            ]
+            chunk_url = None
+            for pat in chunk_patterns:
+                m = re.search(pat, html_text)
+                if m:
+                    chunk_url = m.group(0)
+                    break
+
+            if not chunk_url:
+                logger.warning("自动登录: 未在登录页HTML中找到 login page JS chunk")
+                return None
+
+            # 构建完整的 JS URL
+            js_url = f"{self._base_url}/_next/{chunk_url}"
+            logger.info(f"自动登录: 获取 login page chunk: {js_url}")
+
+            js_resp = scraper.get(js_url, timeout=30, proxies=proxies,
+                                  headers={'User-Agent': settings.USER_AGENT})
+            js_text = getattr(js_resp, 'text', '') or ''
+
+            if not js_text:
+                logger.warning("自动登录: login page chunk 内容为空")
+                return None
+
+            # 匹配 createServerReference("actionId",...,"login")
+            # actionId 是 40 位 hex（实测: 60259b58ded6fccd4bb7622731ec8f70dd20d0649d）
+            m = re.search(r'createServerReference\("([a-f0-9]{40})"[^)]*"login"\)', js_text)
+            if m:
+                action_id = m.group(1)
+                logger.info(f"自动登录: 从 JS chunk 提取到 Server Action ID={action_id}")
+                return action_id
+
+            # 回退：尝试更宽松的匹配
+            m = re.search(r'"([a-f0-9]{40})"[^}]{0,100}"login"', js_text)
+            if m:
+                action_id = m.group(1)
+                logger.info(f"自动登录: 从 JS chunk 提取到 Server Action ID (宽松匹配)={action_id}")
+                return action_id
+
+            logger.warning("自动登录: 未能在 JS chunk 中匹配到 login Server Action ID")
+            return None
+
+        except Exception as e:
+            logger.warning(f"自动登录: 提取 Server Action ID 异常: {e}")
+            return None
+
     def _auto_login(self) -> Optional[str]:
         """
         自动登录获取 Cookie
         
-        登录流程（基于 API 实测验证）:
-        1. 从 actionId 服务 (hdhive.ckid.workers.dev) 获取 Next.js Server Action ID
-        2. 使用 Server Action 方式 POST 登录（实测返回 HTTP 303 + Set-Cookie token）
-        3. 回退：传统 API 登录候选路径
-        4. 兜底：Playwright 浏览器自动化（注意：headless 会被 Cloudflare 拦截）
+        登录流程（v2.4.1 重写，基于实测验证 2026-07-06）:
+        1. GET /login 获取 hdh_sa_token 反CSRF cookie + HTML
+        2. 从 HTML 中找到 login page JS chunk URL → GET JS → 正则提取 Server Action ID
+        3. POST /login 携带 Next-Action 头 + base64 密码 + hdh_sa_token cookie
+        4. 从 Set-Cookie / RSC 响应体中提取 token
+        5. 兜底：Playwright 浏览器自动化（注意：headless 会被 Cloudflare 拦截）
         
-        实测经验（2026-04-07）：
-          - actionId 服务正常可用
-          - Server Action 登录返回 HTTP 303，Set-Cookie 中包含 token
-          - JWT 的用户ID字段为 user_id（非标准 sub）
-          - Playwright headless 模式会被 Cloudflare 拦截，需用非 headless + 代理
+        关键变更（v2.4.1）：
+          - 废弃失效的 ckid.workers.dev 第三方服务
+          - 密码必须 base64 编码，带 password_transport:"base64" 字段
+          - 必须先 GET /login 拿到 hdh_sa_token cookie（Next.js 反 CSRF 机制）
+          - 旧 API 端点 /api/customer/user/login 已 404，移除
         """
         try:
             if not getattr(self, "_username", None) or not getattr(self, "_password", None):
                 logger.warning("未配置用户名或密码，无法自动登录")
                 return None
 
-            # 获取代理配置
             proxies = self._get_proxies()
             login_url = f"{self._base_url}{self._login_page}"
 
-            # 优先使用 cloudscraper（如可用），否则回退到 requests
-            # cloudscraper 在 MoviePilot 等环境可能未安装，必须安全导入
-            scraper = requests
-            has_cloudscraper = False
+            # 使用 cloudscraper（如可用），否则回退到 requests.Session
+            # ★ 必须用 Session：GET /login 拿到的 hdh_sa_token cookie 需要带到 POST
             try:
                 import cloudscraper as _cs_mod
                 scraper = _cs_mod.create_scraper()
-                has_cloudscraper = True
                 logger.info("自动登录: 使用 cloudscraper")
             except ImportError:
-                logger.info("自动登录: cloudscraper 未安装，使用 requests（功能等效）")
+                scraper = requests.Session()
+                logger.info("自动登录: cloudscraper 未安装，使用 requests.Session")
 
-            # ========== 第一步：从 actionId 服务获取 Server Action ID ==========
-            action_id = None
+            # ========== 第一步：GET /login 获取 hdh_sa_token + HTML ==========
+            get_headers = {
+                'User-Agent': settings.USER_AGENT,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            }
             try:
-                logger.info(f"自动登录: 获取 actionId from {self._action_id_url}")
-                action_resp = scraper.post(
-                    self._action_id_url,
-                    json={"domain": self._base_url.replace("https://", "").replace("http://", "")},
-                    timeout=30,
-                    proxies=proxies
-                )
-                logger.info(f"自动登录: actionId 状态码 {getattr(action_resp, 'status_code', 'unknown')}")
-                action_text = getattr(action_resp, 'text', '') or ''
-                m = re.search(r'"actionId"\s*:\s*"([a-fA-F0-9]{16,64})"', action_text)
-                if m:
-                    action_id = m.group(1)
-                    logger.info(f"自动登录: 获取到 actionId={action_id}")
-                else:
-                    logger.warning(f"自动登录: 未能在响应中提取到 actionId，响应内容: {action_text[:200]}")
+                logger.info(f"自动登录: GET {login_url} 获取反CSRF token")
+                resp_get = scraper.get(login_url, headers=get_headers, timeout=30, proxies=proxies)
+                html_text = getattr(resp_get, 'text', '') or ''
+                logger.info(f"自动登录: GET /login 状态码 {getattr(resp_get, 'status_code', '?')}, HTML 长度 {len(html_text)}")
             except Exception as e:
-                logger.warning(f"自动登录: 获取 actionId 失败: {e}")
+                logger.error(f"自动登录: GET /login 失败: {e}")
+                return None
 
-            if not action_id:
-                # 回退：尝试从预热页面提取 next-action token
-                logger.info("自动登录: actionId 获取失败，尝试从页面提取 next-action")
-                try:
-                    resp_warm = scraper.get(login_url, timeout=30, proxies=proxies)
-                    warm_text = getattr(resp_warm, 'text', '') or ''
-                    m = re.search(r'next-action"\s*:\s*"([a-fA-F0-9]{16,64})"', warm_text)
-                    if not m:
-                        m = re.search(r'name="next-action"\s+value="([a-fA-F0-9]{16,64})"', warm_text)
-                    if m:
-                        action_id = m.group(1)
-                        logger.info(f"自动登录: 从页面提取到 next-action={action_id}")
-                except Exception as e:
-                    logger.debug(f"自动登录: 从页面提取 next-action 失败: {e}")
+            # 提取 hdh_sa_token cookie（Next.js Server Action 反 CSRF）
+            sa_token = None
+            try:
+                cookies_dict = resp_get.cookies.get_dict()
+                sa_token = cookies_dict.get('hdh_sa_token')
+                logger.info(f"自动登录: 获取到 hdh_sa_token={'有' if sa_token else '无'}")
+            except Exception:
+                pass
 
-            # ========== 第二步：使用 Server Action 登录（核心方式）==========
+            # ========== 第二步：提取 Server Action ID ==========
+            action_id = self._login_action_id_cache
             if action_id:
-                url = f"{self._base_url}{self._login_page}"
-                headers = {
+                logger.info(f"自动登录: 使用缓存的 Server Action ID={action_id[:16]}...")
+            else:
+                action_id = self._get_login_action_id(html_text, scraper, proxies)
+                if action_id:
+                    self._login_action_id_cache = action_id
+                else:
+                    logger.error("自动登录: 无法获取 Server Action ID，跳过 Server Action 登录")
+
+            # ========== 第三步：POST Server Action 登录 ==========
+            if action_id:
+                # 密码 base64 编码（影巢前端 createServerReference 要求）
+                b64_password = base64.b64encode(
+                    getattr(self, "_password", "").encode('utf-8')
+                ).decode('ascii')
+
+                post_headers = {
                     'User-Agent': settings.USER_AGENT,
                     'Accept': 'text/x-component',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
                     'Origin': self._base_url,
                     'Referer': login_url,
                     'Content-Type': 'text/plain;charset=UTF-8',
                     'Next-Action': action_id,
-                    'next-router-state-tree': '%5B%22%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22login%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2Flogin%22%2C%22refresh%22%5D%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D%7D%2Cnull%2Cnull%2Ctrue%5D'
                 }
-                body = json.dumps([{"username": getattr(self, "_username", ""), "password": getattr(self, "_password", "")}, "/"])
+                # body 格式：[表单数据, redirectUrl]
+                # 影巢前端代码: f({...t, password:base64(t.password), password_transport:"base64"}, e)
+                body = json.dumps([{
+                    "username": getattr(self, "_username", ""),
+                    "password": b64_password,
+                    "password_transport": "base64",
+                }, "/"])
 
                 try:
-                    logger.info(f"自动登录: Server Action 登录 {url} (actionId={action_id[:16]}...)")
-                    # 关键：allow_redirects=False 以便捕获 HTTP 303 和 Set-Cookie 响应头
-                    resp = scraper.post(url, headers=headers, data=body, timeout=30, proxies=proxies, allow_redirects=False)
+                    logger.info(f"自动登录: POST Server Action 登录 (actionId={action_id[:16]}...)")
+                    # allow_redirects=False 以便捕获 Set-Cookie
+                    resp = scraper.post(
+                        login_url, headers=post_headers, data=body,
+                        timeout=30, proxies=proxies, allow_redirects=False
+                    )
                     status_code = getattr(resp, 'status_code', 'unknown')
                     content_type = getattr(resp.headers, 'get', lambda k: '')('Content-Type')
                     logger.info(f"自动登录: SA 登录状态码 {status_code} Content-Type {content_type}")
 
-                    # ★ 实测验证：影巢 Server Action 登录返回 HTTP 303，token 在 Set-Cookie 中
+                    # 提取 token cookie
                     cookie_str = self._extract_login_cookie(resp)
                     if cookie_str:
                         logger.info("Server Action 登录成功，已生成Cookie")
                         return cookie_str
 
-                    # 如果 allow_redirects=False 没拿到 cookie，重试用跟随重定向的方式
-                    logger.debug(f"自动登录: allow_redirects=False 未拿到cookie，尝试跟随重定向...")
-                    resp2 = scraper.post(url, headers=headers, data=body, timeout=30, proxies=proxies, allow_redirects=True)
+                    # 尝试跟随重定向
+                    logger.debug("自动登录: allow_redirects=False 未拿到cookie，尝试跟随重定向...")
+                    resp2 = scraper.post(
+                        login_url, headers=post_headers, data=body,
+                        timeout=30, proxies=proxies, allow_redirects=True
+                    )
                     cookie_str2 = self._extract_login_cookie(resp2)
                     if cookie_str2:
                         logger.info("Server Action 登录成功（跟随重定向），已生成Cookie")
                         return cookie_str2
-                    
-                    logger.warning(f"自动登录: SA 登录未返回 token cookie, 状态码={getattr(resp2,'status_code','?')}, 响应: {getattr(resp2.text, '')[:300] if hasattr(resp2,'text') else 'N/A'}")
+
+                    # 尝试从 RSC 响应体中提取 token
+                    rsc_text = getattr(resp, 'text', '') or getattr(resp2, 'text', '') or ''
+                    if rsc_text:
+                        token_match = re.search(r'"token"\s*:\s*"([^"]+)"', rsc_text)
+                        if token_match:
+                            token_val = token_match.group(1)
+                            csrf_match = re.search(r'"csrf_access_token"\s*:\s*"([^"]+)"', rsc_text)
+                            cookie_items = [f"token={token_val}"]
+                            if csrf_match:
+                                cookie_items.append(f"csrf_access_token={csrf_match.group(1)}")
+                            logger.info("Server Action 登录: 从 RSC 响应体提取到 token")
+                            return "; ".join(cookie_items)
+
+                    resp_text = getattr(resp2, 'text', '') or ''
+                    logger.warning(f"自动登录: SA 登录未返回 token cookie, 状态码={status_code}, 响应: {resp_text[:300]}")
 
                 except Exception as e:
                     logger.warning(f"Server Action 登录失败: {e}")
 
-            # ========== 第三步：回退 - 传统 API 登录候选 ==========
-            logger.info("自动登录: Server Action 未成功，尝试传统 API 登录...")
-            for path in self._login_api_candidates:
-                url = f"{self._base_url}{path}"
-                headers = {
-                    'User-Agent': settings.USER_AGENT,
-                    'Accept': 'application/json, text/plain, */*',
-                    'Origin': self._base_url,
-                    'Referer': login_url,
-                    'Content-Type': 'application/json'
-                }
-                payload = {
-                    'username': getattr(self, "_username", ""),
-                    'password': getattr(self, "_password", "")
-                }
-                try:
-                    logger.info(f"自动登录: 尝试 API 登录 {url}")
-                    resp = scraper.post(url, headers=headers, json=payload, timeout=30, proxies=proxies)
-                    cookie_str = self._extract_login_cookie(resp)
-                    if cookie_str:
-                        logger.info("API 登录成功，已生成Cookie")
-                        return cookie_str
-                    # 尝试从 JSON 响应体中提取 token
-                    try:
-                        data = resp.json()
-                        logger.info(f"自动登录: API 登录返回JSON keys {list(data.keys()) if isinstance(data, dict) else 'non-dict'}")
-                        meta = (data.get('meta') or {})
-                        acc = meta.get('access_token') or meta.get('token')
-                        if acc:
-                            cookie_items = [f"token={acc}"]
-                            logger.info("API 登录: 从响应JSON中提取到 token")
-                            return "; ".join(cookie_items)
-                    except Exception:
-                        pass
-                except Exception as e:
-                    logger.debug(f"API 登录候选失败: {path} -> {e}")
-
             # ========== 第四步：Playwright 浏览器自动化兜底 ==========
-            # ⚠️ 实测发现 headless 模式会被 Cloudflare 拦截
-            #    有代理时使用 headless=True 可能可行，否则需要 headless=False
+            # ⚠️ headless 模式可能被 Cloudflare 拦截，作为最后手段
             try:
                 from playwright.sync_api import sync_playwright
                 logger.info("自动登录: 尝试使用 Playwright 浏览器自动化兜底")
                 proxy = self._get_playwright_proxy()
                 with sync_playwright() as pw:
-                    # 有代理时尝试 headless（代理IP可能绕过Cloudflare），无代理时也尝试 headless
                     launch_args = {"headless": True}
                     if proxy:
                         launch_args["proxy"] = proxy
@@ -1657,29 +1708,26 @@ class HdhiveSignKB(_PluginBase):
                     context = browser.new_context()
                     page = context.new_page()
                     page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
-                    
-                    # 检查是否被 Cloudflare 拦截（页面标题或内容特征）
+
                     page_content = ""
                     try:
                         page.wait_for_load_state("domcontentloaded", timeout=5000)
                         page_content = page.content() or ""
                     except Exception:
                         pass
-                    
+
                     if "Just a moment" in page_content or "Checking your browser" in page_content:
                         logger.warning("检测到 Cloudflare 验证页面，Playwright headless 被拦截")
                         context.close()
                         browser.close()
-                        
-                        # 重试：使用非 headless 模式（需要显示器或有虚拟显示）
+
                         logger.info("Playwright: 切换到 non-headless 模式重试...")
                         try:
                             browser2 = pw.chromium.launch(headless=False, proxy=proxy if proxy else None)
                             context2 = browser2.new_context()
                             page2 = context2.new_page()
                             page2.goto(login_url, wait_until="networkidle", timeout=60000)
-                            
-                            # 填写表单
+
                             for sel in ["input[name='username']", "input[name='email']", "input[type='email']", "input[placeholder*='邮箱']", "input[placeholder*='email']", "input[placeholder*='用户名']"]:
                                 try:
                                     if page2.query_selector(sel):
@@ -1694,7 +1742,6 @@ class HdhiveSignKB(_PluginBase):
                                         break
                                 except Exception:
                                     continue
-                            # 提交
                             try:
                                 btn = page2.query_selector("button[type='submit']") or page2.query_selector("button:has-text('登录')") or page2.query_selector("button:has-text('Login')")
                                 if btn:
@@ -1707,7 +1754,7 @@ class HdhiveSignKB(_PluginBase):
                                 page2.wait_for_load_state("networkidle", timeout=15000)
                             except Exception:
                                 pass
-                            
+
                             cookies = context2.cookies()
                             cookie_str = self._build_cookie_string(cookies)
                             context2.close()
@@ -1718,7 +1765,6 @@ class HdhiveSignKB(_PluginBase):
                         except Exception as e2:
                             logger.error(f"Playwright non-headless 也失败: {e2}")
                     else:
-                        # headless 成功加载页面，继续正常流程
                         selectors = [
                             "input[name='username']", "input[name='email']", "input[type='email']",
                             "input[placeholder*='邮箱']", "input[placeholder*='email']", "input[placeholder*='用户名']",
