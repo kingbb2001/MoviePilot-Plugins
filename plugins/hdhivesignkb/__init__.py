@@ -1,6 +1,6 @@
 ﻿"""
 影巢签到插件
-版本: 2.4.3
+版本: 2.4.4
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,9 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.4.4: 修复签到API返回401"请求签名缺失"：新增_warmup_session()方法，登录后访问首页建立完整
+  会话上下文捕获所有Cookie（包括签名相关cookie）；签到前强制预热会话确保CSRF token完整；
+  _signin_base新增X-Requested-With请求头模拟AJAX请求；新增详细调试日志输出cookie状态
 - v2.4.3: 修复版本号与package.json不一致导致插件市场更新失败（plugin_version由2.4.1→2.4.3）；
   修复plugin_icon指向错误仓库(madrays→kingbb2001)；_login_action_id_cache改为实例变量避免多实例冲突；
   改进Server Action ID正则：hex长度范围扩大到40-48位，新增多重回退匹配策略，扩展附近文本搜索范围到300字符
@@ -64,7 +67,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.4.3"
+    plugin_version = "2.4.4"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -206,7 +209,7 @@ class HdhiveSignKB(_PluginBase):
         # 初始化实例级别的缓存变量
         self._login_action_id_cache = None
 
-        logger.info("============= hdhivesign v2.4.3 初始化 =============")
+        logger.info("============= hdhivesign v2.4.4 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -337,6 +340,13 @@ class HdhiveSignKB(_PluginBase):
                     self._cookie = new_cookie
                     self._save_config()
                     logger.info("已通过自动登录获取新Cookie")
+
+                    # ★ v2.4.4: 登录后预热会话，访问首页建立完整Cookie上下文
+                    warmed = self._warmup_session(self._cookie)
+                    if warmed:
+                        self._cookie = warmed
+                        self._save_config()
+                        logger.info("会话预热完成，Cookie已更新")
                 else:
                     logger.error("未配置Cookie且自动登录失败")
                     sign_dict = {
@@ -371,6 +381,11 @@ class HdhiveSignKB(_PluginBase):
                     self._fetch_user_info(cookies, token)
             except Exception:
                 pass
+
+            # ── 4.5 会话预热（确保Cookie中有完整的会话上下文） ──────
+            warmed = self._warmup_session(self._cookie)
+            if warmed:
+                self._cookie = warmed
 
             # ── 5. 执行签到 API ─────────────────────────────────────────
             state, message = self._signin_base()
@@ -565,12 +580,19 @@ class HdhiveSignKB(_PluginBase):
             headers = {
                 'User-Agent': ua,
                 'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
                 'Origin': self._base_url,
                 'Referer': referer,
                 'Authorization': f'Bearer {token}',
+                'X-Requested-With': 'XMLHttpRequest',
             }
             if csrf_token:
                 headers['x-csrf-token'] = csrf_token
+
+            logger.debug(f"签到请求: URL={self._signin_api}, "
+                         f"has_auth={'是' if token else '否'}, "
+                         f"has_csrf={'是' if csrf_token else '否'}, "
+                         f"cookie_keys={list(cookies.keys())}")
 
             signin_res = requests.post(
                 url=self._signin_api,
@@ -625,6 +647,80 @@ class HdhiveSignKB(_PluginBase):
         except Exception as e:
             logger.error(f"签到流程发生未知异常", exc_info=True)
             return False, f'签到异常: {str(e)}'
+
+    def _warmup_session(self, cookie_str: str) -> Optional[str]:
+        """登录/获取Cookie后预热会话：访问首页建立完整Cookie上下文，获取最新CSRF token。
+
+        影巢API要求请求携带有效的CSRF签名，仅在登录响应中提取的csrf_access_token
+        可能不够完整。通过访问首页让服务器设置完整的会话Cookie（包括可能的
+        签名相关cookie），并从中提取最新的token和csrf_token。
+
+        Args:
+            cookie_str: 当前cookie字符串
+
+        Returns:
+            增强后的cookie字符串，或None表示预热失败（保持原cookie不变）
+        """
+        try:
+            cookies_dict = {}
+            token_val = None
+            if cookie_str:
+                for item in cookie_str.split(';'):
+                    if '=' in item:
+                        name, value = item.strip().split('=', 1)
+                        cookies_dict[name] = value
+                        if name == 'token':
+                            token_val = value
+            if not token_val:
+                logger.warning("会话预热: 当前cookie中无token，跳过预热")
+                return None
+
+            proxies = self._get_proxies()
+            session = requests.Session()
+            # 预置已有 cookie
+            for name, value in cookies_dict.items():
+                session.cookies.set(name, value)
+
+            logger.info("会话预热: 访问首页建立完整会话上下文...")
+            home_resp = session.get(
+                self._site_url,
+                headers={
+                    'User-Agent': settings.USER_AGENT,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                },
+                proxies=proxies,
+                timeout=30,
+                verify=False,
+                allow_redirects=True,
+            )
+            logger.info(f"会话预热: 首页状态码 {home_resp.status_code}")
+
+            # 合并所有 cookie（首页可能设置新的或更新已有的）
+            all_cookies = session.cookies.get_dict()
+            new_token = all_cookies.get('token')
+            new_csrf = all_cookies.get('csrf_access_token')
+
+            if new_token:
+                cookie_parts = [f"token={new_token}"]
+                if new_csrf:
+                    cookie_parts.append(f"csrf_access_token={new_csrf}")
+                result = "; ".join(cookie_parts)
+                logger.info(
+                    f"会话预热: 成功，已更新cookie "
+                    f"(has_csrf={'是' if new_csrf else '否'}, "
+                    f"cookies_count={len(all_cookies)})"
+                )
+                # 额外日志：列出所有cookie键名（不暴露值）
+                logger.debug(f"会话预热: 首页返回的cookie键: {list(all_cookies.keys())}")
+                return result
+
+            logger.warning("会话预热: 首页响应中未找到token cookie")
+            return None
+
+        except Exception as e:
+            logger.warning(f"会话预热异常: {e}", exc_info=True)
+            return None
 
     def _save_sign_history(self, sign_data):
         """
