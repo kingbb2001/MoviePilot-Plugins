@@ -80,7 +80,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.5.2"
+    plugin_version = "2.5.3"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -223,7 +223,7 @@ class HdhiveSignKB(_PluginBase):
         self._login_action_id_cache = None
         self._checkin_action_id = None  # v2.4.8: 签到Server Action ID缓存
 
-        logger.info("============= hdhivesign v2.5.2 初始化 =============")
+        logger.info("============= hdhivesign v2.5.3 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -1933,50 +1933,57 @@ class HdhiveSignKB(_PluginBase):
                         logger.info(f"Server Action签到(积分): {obj_str[:300]}")
                         return True, msg or obj_str[:300]
 
-                # ── 策略2: 全局关键词搜索（仅提取纯中文文本） ──
-                # 已签到
-                for kw in ['已经签到', '签到过', '重复签到', '明日再来']:
-                    if kw in text:
-                        # 提取周围的纯中文片段
-                        for m in re.finditer(r'[一-鿿]+', text):
-                            if kw in m.group():
-                                idx = text.find(m.group())
-                                snippet = text[max(0,idx-5):idx+len(m.group())+50]
-                                # 只保留可打印ASCII+中文
-                                clean = ''.join(
-                                    c for c in snippet
-                                    if c.isprintable() and (
-                                        '一' <= c <= '鿿'
-                                        or c in '，。！？、：；（）""'''
-                                        or c.isascii())
-                                )
-                                logger.info(f"Server Action签到已签到: {clean[:200]}")
-                                return True, "今天已经签到过了，明天再来吧"
+                # ── v2.5.3: 策略2 — 直接在原始文本中搜索带引号的签到消息 ──
+                # 签到结果可能嵌在深层JSON中，逐行解析无法触及，
+                # 但消息本身是 "message":"中文内容" 或 "中文内容" 格式
+                sign_kws = ['已经签到', '签到过', '重复签到', '明日再来',
+                           '签到成功', '获得', '积分', '奖励']
+                for kw in sign_kws:
+                    if kw not in text:
+                        continue
+                    # 找包含该关键词的引号字符串
+                    # 模式: "任意内容关键词任意内容"
+                    for m in re.finditer(
+                            r'"([^"]*' + re.escape(kw) + r'[^"]*)"', text):
+                        quoted = m.group(1)
+                        if len(quoted) > 3 and len(quoted) < 200:
+                            logger.info(f"Server Action签到消息({kw}): {quoted}")
+                            return True, quoted
 
-                # 签到成功
-                for kw in ['获得', '积分', '签到成功']:
-                    if kw in text:
-                        idx = text.find(kw)
-                        snippet = text[max(0,idx-10):min(len(text),idx+100)]
-                        clean = ''.join(
-                            c for c in snippet
-                            if c.isprintable() and (
-                                '一' <= c <= '鿿'
-                                or c in '，。！？、：；（）""''0123456789'
-                                or (c.isascii() and c.isprintable()))
-                        ).strip()
-                        if clean and len(clean) > 5:
-                            logger.info(f"Server Action签到成功({kw}): {clean[:200]}")
-                            return True, clean[:200]
+                # 回退: 搜索未被引号包裹的中文句子
+                for kw in sign_kws:
+                    if kw not in text:
+                        continue
+                    idx = text.find(kw)
+                    # 取前后50字符
+                    chunk = text[max(0,idx-50):min(len(text),idx+50)]
+                    # 提取连续的中文+数字+标点
+                    clean = re.search(r'[一-鿿　-〿＀-￯\d]+', chunk)
+                    if clean:
+                        msg = clean.group().strip()
+                        if len(msg) > 2:
+                            logger.info(f"Server Action签到文本({kw}): {msg}")
+                            return True, msg
 
-                # ── 策略3: 返回首个有意义的JSON或中文片段 ──
+                # 已签到关键词匹配失败但文本存在 → 返回默认消息
+                if any(kw in text for kw in ['已经签到', '签到过', '重复签到']):
+                    logger.info("Server Action签到: 检测到已签到关键词")
+                    return True, "今天已经签到过了，明天再来吧"
+
+                # ── 策略3: 在原始文本中搜索 success 标志 ──
+                if re.search(r'"success"\s*:\s*true', text):
+                    logger.info("Server Action签到: 检测到 success:true")
+                    return True, "签到成功"
+
+                # ── 策略4: 返回首个有意义的JSON ──
                 if rsc_jsons:
                     first = json.dumps(rsc_jsons[0], ensure_ascii=False)
                     logger.info(f"Server Action签到(首个JSON): {first[:200]}")
                     return True, first[:200]
 
-                logger.warning(f"Server Action签到: 200但完全未找到签到结果")
-                return False, "签到返回200但解析失败"
+                # 200但什么都找不到 → 仍算成功（Server Action已执行）
+                logger.warning("Server Action签到: 200但完全未找到签到结果")
+                return True, "签到已提交（解析失败）"
 
             # 非200
             resp_text = (getattr(resp, 'text', '') or '')[:500]
