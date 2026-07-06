@@ -1,6 +1,6 @@
 ﻿"""
 影巢签到插件
-版本: 2.4.8
+版本: 2.4.9
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,8 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.4.9: 完善RSC响应解析：Server Action签到返回200后，改为在完整RSC文本中
+  搜索签到结果（支持JSON行匹配+关键词回退），不再截取前500字符导致遗漏
 - v2.4.8: 实现签到Server Action方式（仿照登录流程）：_warmup_session从首页JS chunk
   自动搜索签到Server Action ID；新增_get_server_action_id()通用方法支持任意关键字搜索；
   新增_try_server_action_checkin()使用Next-Action头+Server Action body格式签到；
@@ -78,7 +80,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.4.8"
+    plugin_version = "2.4.9"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -221,7 +223,7 @@ class HdhiveSignKB(_PluginBase):
         self._login_action_id_cache = None
         self._checkin_action_id = None  # v2.4.8: 签到Server Action ID缓存
 
-        logger.info("============= hdhivesign v2.4.8 初始化 =============")
+        logger.info("============= hdhivesign v2.4.9 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -1844,10 +1846,11 @@ class HdhiveSignKB(_PluginBase):
     def _try_server_action_checkin(self, action_id: str,
                                     cookies: Dict[str, str],
                                     token: str) -> Tuple[bool, str]:
-        """使用Server Action方式签到（v2.4.8新增）。
+        """使用Server Action方式签到（v2.4.8新增，v2.4.9完善RSC解析）。
 
-        影巢可能已将签到改为Next.js Server Action，需要Next-Action头
-        和特定body格式。此方法模仿_auto_login中Server Action登录的方式。
+        Next.js Server Action 返回 RSC (React Server Component) 流，
+        格式为换行分隔的 <id>:<data>，其中data可能是JSON或React元素引用。
+        签到结果JSON嵌在RSC流的某一行中。
 
         Returns:
             (success, message) 元组
@@ -1863,12 +1866,11 @@ class HdhiveSignKB(_PluginBase):
                 'Content-Type': 'text/plain;charset=UTF-8',
                 'Next-Action': action_id,
             }
-            # Server Action body格式: JSON数组 [args, 额外参数]
             body = json.dumps([{}])
 
             logger.info(f"Server Action签到: actionId={action_id[:16]}...")
             resp = requests.post(
-                url=self._site_url,  # Server Actions POST到当前页面URL
+                url=self._site_url,
                 headers=headers,
                 cookies=cookies,
                 data=body,
@@ -1880,20 +1882,62 @@ class HdhiveSignKB(_PluginBase):
                         f"CT={resp.headers.get('Content-Type', '?')}")
 
             if resp.status_code == 200:
-                try:
-                    result = resp.json()
-                    success = result.get('success', False)
-                    message = result.get('message', '')
-                    return success, message or str(result)[:200]
-                except json.JSONDecodeError:
-                    # RSC响应可能不是JSON
-                    text = (getattr(resp, 'text', '') or '')[:500]
-                    logger.info(f"Server Action签到: 非JSON响应 {text[:200]}")
-                    # 检查是否包含成功标志
-                    if '签到成功' in text or '获得' in text:
-                        return True, text[:200]
-                    if '已经签到' in text or '签到过' in text:
-                        return True, "已经签到过了"
+                text = getattr(resp, 'text', '') or ''
+                logger.info(f"Server Action签到: 响应长度={len(text)}")
+
+                # v2.4.9: 在完整RSC文本中搜索签到结果
+                # RSC格式: 每行 "<id>:<json-or-component-ref>"
+                # 签到结果通常在JSON行中，包含 success/message/points 等字段
+
+                # 模式1: 搜索包含签到结果的JSON对象
+                # RSC中JSON行格式: "数字:{"success":true,"message":"获得 X 积分",...}"
+                result_patterns = [
+                    r'\{[^}]*"success"\s*:\s*true[^}]*"message"\s*:\s*"([^"]*)"[^}]*\}',
+                    r'\{[^}]*"message"\s*:\s*"([^"]*)"[^}]*"success"\s*:\s*true[^}]*\}',
+                ]
+                for pat in result_patterns:
+                    m = re.search(pat, text)
+                    if m:
+                        msg = m.group(1)
+                        logger.info(f"Server Action签到成功: {msg}")
+                        return True, msg
+
+                # 模式2: 在RSC中搜索"已签到"相关文本
+                already_signed_patterns = [
+                    r'"message"\s*:\s*"([^"]*已经签到[^"]*)"',
+                    r'"message"\s*:\s*"([^"]*签到过[^"]*)"',
+                    r'"description"\s*:\s*"([^"]*已经签到[^"]*)"',
+                    r'"description"\s*:\s*"([^"]*签到过[^"]*)"',
+                ]
+                for pat in already_signed_patterns:
+                    m = re.search(pat, text)
+                    if m:
+                        msg = m.group(1)
+                        logger.info(f"Server Action签到: 已签到 - {msg}")
+                        return True, msg
+
+                # 模式3: 在文本中搜索关键词
+                if '签到成功' in text or '获得' in text:
+                    # 尝试提取更多上下文
+                    idx = text.find('签到成功')
+                    if idx < 0:
+                        idx = text.find('获得')
+                    snippet = text[max(0,idx-50):min(len(text),idx+150)]
+                    logger.info(f"Server Action签到成功(关键词): {snippet[:200]}")
+                    return True, snippet[:200]
+
+                if '已经签到' in text or '重复签到' in text:
+                    idx = text.find('已经签到')
+                    if idx < 0:
+                        idx = text.find('重复签到')
+                    snippet = text[max(0,idx-20):min(len(text),idx+100)]
+                    logger.info(f"Server Action签到: 已签到(关键词) - {snippet[:200]}")
+                    return True, "已经签到过了"
+
+                # 没有找到签到结果，记录部分响应用于调试
+                logger.warning(f"Server Action签到: 200但未找到签到结果，"
+                               f"响应前500字符: {text[:500]}")
+                return False, f"RSC响应中未找到签到结果 (长度={len(text)})"
 
             # 401或其它错误
             resp_text = (getattr(resp, 'text', '') or '')[:500]
