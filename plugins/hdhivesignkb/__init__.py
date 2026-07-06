@@ -1,6 +1,6 @@
 ﻿"""
 影巢签到插件
-版本: 2.4.4
+版本: 2.4.5
 作者: kingbb2001
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,10 @@
 - 默认使用代理访问
 
 修改记录:
+- v2.4.5: 修复_extract_login_cookie只提取token和csrf_access_token导致遗漏签名cookie：
+  改为捕获登录响应中所有Set-Cookie并完整组装；新增cookie键名日志输出方便排查；
+  _warmup_session改用cloudscraper优先+多页面回退（首页→登录页）避免SSL/CF拦截；
+  增加重试容错，所有页面失败时保持原cookie继续签到
 - v2.4.4: 修复签到API返回401"请求签名缺失"：新增_warmup_session()方法，登录后访问首页建立完整
   会话上下文捕获所有Cookie（包括签名相关cookie）；签到前强制预热会话确保CSRF token完整；
   _signin_base新增X-Requested-With请求头模拟AJAX请求；新增详细调试日志输出cookie状态
@@ -67,7 +71,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.4.4"
+    plugin_version = "2.4.5"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -209,7 +213,7 @@ class HdhiveSignKB(_PluginBase):
         # 初始化实例级别的缓存变量
         self._login_action_id_cache = None
 
-        logger.info("============= hdhivesign v2.4.4 初始化 =============")
+        logger.info("============= hdhivesign v2.4.5 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -649,17 +653,10 @@ class HdhiveSignKB(_PluginBase):
             return False, f'签到异常: {str(e)}'
 
     def _warmup_session(self, cookie_str: str) -> Optional[str]:
-        """登录/获取Cookie后预热会话：访问首页建立完整Cookie上下文，获取最新CSRF token。
+        """登录/获取Cookie后预热会话：访问站点建立完整Cookie上下文。
 
-        影巢API要求请求携带有效的CSRF签名，仅在登录响应中提取的csrf_access_token
-        可能不够完整。通过访问首页让服务器设置完整的会话Cookie（包括可能的
-        签名相关cookie），并从中提取最新的token和csrf_token。
-
-        Args:
-            cookie_str: 当前cookie字符串
-
-        Returns:
-            增强后的cookie字符串，或None表示预热失败（保持原cookie不变）
+        v2.4.5: 优先用 cloudscraper（可绕过 Cloudflare）；如果首页SSL失败
+        则回退到 /login 页面；增加重试逻辑。
         """
         try:
             cookies_dict = {}
@@ -676,46 +673,69 @@ class HdhiveSignKB(_PluginBase):
                 return None
 
             proxies = self._get_proxies()
-            session = requests.Session()
+
+            # v2.4.5: 优先用 cloudscraper（可处理 Cloudflare 保护）
+            try:
+                import cloudscraper
+                session = cloudscraper.create_scraper()
+                logger.info("会话预热: 使用 cloudscraper")
+            except ImportError:
+                session = requests.Session()
+                logger.info("会话预热: cloudscraper 未安装，使用 requests.Session")
+
             # 预置已有 cookie
             for name, value in cookies_dict.items():
                 session.cookies.set(name, value)
 
-            logger.info("会话预热: 访问首页建立完整会话上下文...")
-            home_resp = session.get(
-                self._site_url,
-                headers={
-                    'User-Agent': settings.USER_AGENT,
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                },
-                proxies=proxies,
-                timeout=30,
-                verify=False,
-                allow_redirects=True,
-            )
-            logger.info(f"会话预热: 首页状态码 {home_resp.status_code}")
+            # v2.4.5: 尝试多个页面，因为首页可能被 Cloudflare/反爬拦截
+            warmup_urls = [
+                (self._site_url, "首页"),
+                (f"{self._base_url}/login", "登录页"),
+            ]
 
-            # 合并所有 cookie（首页可能设置新的或更新已有的）
-            all_cookies = session.cookies.get_dict()
-            new_token = all_cookies.get('token')
-            new_csrf = all_cookies.get('csrf_access_token')
+            for warmup_url, page_label in warmup_urls:
+                try:
+                    logger.info(f"会话预热: 访问{page_label}建立会话上下文... {warmup_url}")
+                    resp = session.get(
+                        warmup_url,
+                        headers={
+                            'User-Agent': settings.USER_AGENT,
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                        },
+                        proxies=proxies,
+                        timeout=30,
+                        verify=False,
+                        allow_redirects=True,
+                    )
+                    logger.info(f"会话预热: {page_label} 状态码 {resp.status_code}")
 
-            if new_token:
-                cookie_parts = [f"token={new_token}"]
-                if new_csrf:
-                    cookie_parts.append(f"csrf_access_token={new_csrf}")
-                result = "; ".join(cookie_parts)
-                logger.info(
-                    f"会话预热: 成功，已更新cookie "
-                    f"(has_csrf={'是' if new_csrf else '否'}, "
-                    f"cookies_count={len(all_cookies)})"
-                )
-                # 额外日志：列出所有cookie键名（不暴露值）
-                logger.debug(f"会话预热: 首页返回的cookie键: {list(all_cookies.keys())}")
-                return result
+                    # 合并所有 cookie
+                    all_cookies = session.cookies.get_dict()
+                    new_token = all_cookies.get('token')
+                    new_csrf = all_cookies.get('csrf_access_token')
 
-            logger.warning("会话预热: 首页响应中未找到token cookie")
+                    if new_token:
+                        cookie_items = []
+                        for name, value in all_cookies.items():
+                            if value:
+                                cookie_items.append(f"{name}={value}")
+                        result = "; ".join(cookie_items)
+                        logger.info(
+                            f"会话预热: 成功 ({page_label})，已更新cookie "
+                            f"(cookies_count={len(all_cookies)}, "
+                            f"keys={list(all_cookies.keys())})"
+                        )
+                        return result
+
+                    logger.info(f"会话预热: {page_label}未返回token cookie，尝试下一个...")
+
+                except Exception as e:
+                    logger.warning(f"会话预热: {page_label} 访问异常: {e}")
+                    continue
+
+            # 所有页面都失败了，但登录响应中可能有完整 cookie
+            logger.warning("会话预热: 所有页面访问均失败，保持原cookie不变")
             return None
 
         except Exception as e:
@@ -1936,40 +1956,37 @@ class HdhiveSignKB(_PluginBase):
             return None
 
     def _extract_login_cookie(self, resp) -> Optional[str]:
-        """
-        从登录响应中提取 Cookie 字符串。
-        优先检查 Set-Cookie 响应头，其次检查响应体。
-        
+        """从登录响应中提取完整的 Cookie 字符串。
+
+        v2.4.5: 不再只提取 token 和 csrf_access_token，而是捕获登录响应中
+        设置的所有 cookie。影巢可能在登录时设置额外的签名/会话 cookie，
+        遗漏这些 cookie 会导致后续 API 请求返回 401"请求签名缺失"。
+
         实测验证（2026-04-07）：影巢 Server Action 登录返回 HTTP 303，
         token 通过 Set-Cookie 响应头设置（非 JSON body）。
         """
-        token_cookie = None
-        csrf_cookie = None
-        
-        # 方式1：从 Set-Cookie 响应头提取（最可靠的方式）
         cookies_dict = {}
         try:
-            # 兼容 requests 和 cloudscraper 的 cookies 接口
             raw_cookies = getattr(resp, 'cookies', None)
             if raw_cookies is not None:
                 if hasattr(raw_cookies, 'get_dict'):
                     cookies_dict = raw_cookies.get_dict()
                 elif hasattr(raw_cookies, '__iter__'):
-                    # 某些版本的 cookie jar
                     for c in raw_cookies:
                         if hasattr(c, 'name'):
                             cookies_dict[c.name] = c.value
-            
-            token_cookie = cookies_dict.get('token')
-            csrf_cookie = cookies_dict.get('csrf_access_token')
         except Exception:
             pass
-        
-        # 方式2：如果响应头没有，尝试从响应体解析
+
+        # 记录所有捕获到的 cookie 键名（不暴露值）
+        logger.info(f"_extract_login_cookie: Set-Cookie 包含 {len(cookies_dict)} 个cookie: "
+                    f"{list(cookies_dict.keys())}")
+
+        # 如果 Set-Cookie 中没有 token，尝试从响应体提取
+        token_cookie = cookies_dict.get('token')
         if not token_cookie:
             try:
                 resp_text = getattr(resp, 'text', '') or ''
-                # 尝试 JSON 响应
                 try:
                     data = json.loads(resp_text) if isinstance(resp_text, str) else {}
                     if isinstance(data, dict):
@@ -1979,23 +1996,31 @@ class HdhiveSignKB(_PluginBase):
                             logger.info("_extract_login_cookie: 从响应JSON中提取到 token")
                 except (json.JSONDecodeError, TypeError):
                     pass
-                
-                # 尝试正则从文本中提取
                 if not token_cookie and isinstance(resp_text, str):
                     tm = re.search(r'"token"\s*:\s*"([^"]+)"', resp_text)
                     if tm:
                         token_cookie = tm.group(1)
+                        cookies_dict['token'] = token_cookie
                         logger.info("_extract_login_cookie: 从响应文本正则提取到 token")
+                        # 同时尝试提取 csrf
+                        cm = re.search(r'"csrf_access_token"\s*:\s*"([^"]+)"', resp_text)
+                        if cm and 'csrf_access_token' not in cookies_dict:
+                            cookies_dict['csrf_access_token'] = cm.group(1)
             except Exception:
                 pass
-        
-        # 组装 cookie 字符串
-        if token_cookie:
-            cookie_items = [f"token={token_cookie}"]
-            if csrf_cookie:
-                cookie_items.append(f"csrf_access_token={csrf_cookie}")
-            return "; ".join(cookie_items)
-        
+
+        # ★ v2.4.5: 组装完整的 cookie 字符串（包含所有 cookie，不仅是 token + csrf）
+        if token_cookie or cookies_dict.get('token'):
+            cookie_items = []
+            for name, value in cookies_dict.items():
+                if value:  # 跳过空值
+                    cookie_items.append(f"{name}={value}")
+            if cookie_items:
+                result = "; ".join(cookie_items)
+                logger.info(f"_extract_login_cookie: 成功组装 {len(cookie_items)} 个cookie: "
+                            f"{list(cookies_dict.keys())}")
+                return result
+
         return None
 
     def _build_cookie_string(self, cookies: list) -> Optional[str]:
