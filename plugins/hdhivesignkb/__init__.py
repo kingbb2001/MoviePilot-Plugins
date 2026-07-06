@@ -80,7 +80,7 @@ class HdhiveSignKB(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/kingbb2001/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "2.5.0"
+    plugin_version = "2.5.1"
     # 插件作者
     plugin_author = "kingbb2001"
     # 作者主页
@@ -223,7 +223,7 @@ class HdhiveSignKB(_PluginBase):
         self._login_action_id_cache = None
         self._checkin_action_id = None  # v2.4.8: 签到Server Action ID缓存
 
-        logger.info("============= hdhivesign v2.5.0 初始化 =============")
+        logger.info("============= hdhivesign v2.5.1 初始化 =============")
         try:
             if config:
                 self._enabled = config.get("enabled")
@@ -586,16 +586,6 @@ class HdhiveSignKB(_PluginBase):
             except Exception as e:
                 logger.warning(f"从Token中解析用户ID失败，将使用默认Referer: {e}")
 
-            # ★ v2.4.8: 如果有签到Server Action ID，优先用Server Action方式
-            checkin_action_id = getattr(self, '_checkin_action_id', None)
-            if checkin_action_id:
-                logger.info(f"尝试Server Action签到 (actionId={checkin_action_id[:16]}...)")
-                sa_success, sa_msg = self._try_server_action_checkin(
-                    checkin_action_id, cookies, token)
-                if sa_success or "已经签到" in sa_msg:
-                    return True, sa_msg
-                logger.info(f"Server Action签到未成功({sa_msg})，回退到REST API")
-
             proxies = self._get_proxies()
             ua = settings.USER_AGENT
 
@@ -694,11 +684,38 @@ class HdhiveSignKB(_PluginBase):
                     pass
                 return True, display_message
 
-            # v2.4.6: 401/403时输出完整响应体便于排查
+            # v2.5.1: REST API返回401时，搜索签到Server Action ID并回退
             if signin_res.status_code in (401, 403):
+                logger.info(f"REST API返回{signin_res.status_code}，尝试Server Action签到...")
+                if not getattr(self, '_checkin_action_id', None):
+                    # 延迟搜索：快速GET首页，从HTML提取JS chunk中的签到action ID
+                    try:
+                        logger.info("搜索签到Server Action ID（仅首次）...")
+                        quick_resp = requests.get(
+                            self._site_url,
+                            headers={'User-Agent': ua,
+                                     'Accept': 'text/html'},
+                            proxies=proxies, timeout=15, verify=False)
+                        html = getattr(quick_resp, 'text', '') or ''
+                        if html:
+                            self._checkin_action_id = self._get_server_action_id(
+                                html, requests.Session(), proxies, keyword="checkin")
+                            if not self._checkin_action_id:
+                                self._checkin_action_id = self._get_server_action_id(
+                                    html, requests.Session(), proxies, keyword="sign")
+                    except Exception as e:
+                        logger.warning(f"搜索签到action ID失败: {e}")
+
+                if getattr(self, '_checkin_action_id', None):
+                    sa_success, sa_msg = self._try_server_action_checkin(
+                        self._checkin_action_id, cookies, token)
+                    if sa_success:
+                        return True, sa_msg
+                    logger.info(f"Server Action签到未成功: {sa_msg}")
+
                 logger.error(
                     f"签到失败 (HTTP {signin_res.status_code}), "
-                    f"响应体: {signin_res.text[:1000]}"
+                    f"响应体: {signin_res.text[:500]}"
                 )
             else:
                 logger.error(f"签到失败, HTTP状态码: {signin_res.status_code}, 消息: {display_message}")
@@ -711,8 +728,7 @@ class HdhiveSignKB(_PluginBase):
     def _warmup_session(self, cookie_str: str) -> Optional[str]:
         """登录/获取Cookie后预热会话：访问站点建立完整Cookie上下文。
 
-        v2.4.8: 同时搜索首页HTML中的签到Server Action ID，
-        保存到 self._checkin_action_id 供后续使用。
+        v2.5.1: 简化为仅收集Cookie，签到action ID改为延迟搜索。
         """
         try:
             cookies_dict = {}
@@ -782,26 +798,6 @@ class HdhiveSignKB(_PluginBase):
                             f"(cookies_count={len(all_cookies)}, "
                             f"keys={list(all_cookies.keys())})"
                         )
-
-                        # ★ v2.4.8: 从首页HTML搜索签到Server Action ID
-                        try:
-                            html = getattr(resp, 'text', '') or ''
-                            if html and page_label == "首页":
-                                self._checkin_action_id = self._get_server_action_id(
-                                    html, session, proxies, keyword="checkin")
-                                if not self._checkin_action_id:
-                                    # 回退：搜索 "sign" 或 "daily"
-                                    self._checkin_action_id = self._get_server_action_id(
-                                        html, session, proxies, keyword="sign")
-                                if self._checkin_action_id:
-                                    logger.info(f"会话预热: 找到签到Server Action ID "
-                                                f"={self._checkin_action_id[:16]}...")
-                                else:
-                                    logger.info("会话预热: 未在首页找到签到Server Action ID，"
-                                                "将使用传统API方式签到")
-                        except Exception:
-                            pass
-
                         return result
 
                     logger.info(f"会话预热: {page_label}未返回token cookie，尝试下一个...")
